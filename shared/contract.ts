@@ -1,8 +1,17 @@
 /**
  * Shared API Contract & Types for YouTube AI Studio
- * Defined in docs/agy-context.md Section 4.
+ * Defined in docs/agy-context.md & FINAL Sprint Prompt.
  * DO NOT MODIFY in feature branches — only main lead may update this file.
  */
+
+export type ProjectMode = "edit-only" | "edit-plus-script" | "script-only";
+
+export type VoiceProfile = {
+  voiceId: string;
+  label: string;
+  createdAt: string;
+  isDefault?: boolean;
+};
 
 export type CutReason = "ng" | "silence" | "repeat" | "offtopic";
 
@@ -50,6 +59,9 @@ export type PlannedScene = {
   sourceRange?: TimeRange;
   template?: SceneTemplate;
   visuals?: string[];
+  /** Optional base64 WAV or object URL for synthesized TTS audio */
+  audioUrl?: string;
+  audioBase64?: string;
 };
 
 export type ScenePlan = {
@@ -61,6 +73,7 @@ export type ScenePlan = {
   gaps: ExplanationGap[];
   scenes: PlannedScene[];
   uncertainFacts: string[];
+  mode?: ProjectMode;
 };
 
 export type SceneCodeSource = "argon-code" | "template-fallback";
@@ -69,11 +82,12 @@ export type SceneCode = {
   sceneId: string;
   /**
    * Function body of `function draw(ctx, t, w, h, scene)`
-   * Deterministic Canvas 2D + Math only.
+   * Deterministic Canvas 2D + Math + kit.* helpers.
    */
   code: string;
   attempts: number;
   source: SceneCodeSource;
+  usedModel?: string;
   lastError?: string;
 };
 
@@ -89,18 +103,26 @@ export type VerifyReport = {
   passed: boolean;
   checks: SceneVerifyCheck[];
   retried: boolean;
+  usedModel?: string;
+  verificationMode?: "multimodal-argon" | "structural-check";
 };
+
+export type ApiEndpointPath =
+  | "/api/voice/clone"
+  | "/api/plan"
+  | "/api/script"
+  | "/api/tts"
+  | "/api/scene-code"
+  | "/api/fix-code"
+  | "/api/verify"
+  | "/api/revise";
 
 export type ModelCallLogEntry = {
   id: string;
   timestamp: string;
-  endpoint:
-    | "/api/plan"
-    | "/api/scene-code"
-    | "/api/fix-code"
-    | "/api/verify"
-    | "/api/revise";
+  endpoint: ApiEndpointPath;
   model: string;
+  usedModel?: string;
   sceneId?: string;
   attempt: number;
   durationMs: number;
@@ -117,6 +139,7 @@ export type ApiErrorResponse = {
     code: string;
     message: string;
     retryable: boolean;
+    usedModel?: string;
   };
 };
 
@@ -124,9 +147,28 @@ export type ApiErrorResponse = {
 export type HealthResponse = {
   ok: boolean;
   model: string;
+  ttsModel?: string;
   renderer: string;
   hasApiKey?: boolean;
   timestamp?: string;
+};
+
+/** POST /api/voice/clone */
+export type VoiceCloneRequest = {
+  /** Base64 encoded audio (10~30s wav/mp3/webm) */
+  audioBase64?: string;
+  mimeType?: string;
+  /** Optional separate consent audio; defaults to audioBase64 if same clip includes consent */
+  consentAudioBase64?: string;
+  consentMimeType?: string;
+  consent: boolean;
+  label?: string;
+};
+export type VoiceCloneResponse = {
+  voiceId: string;
+  label: string;
+  usedModel: string;
+  modelLog?: ModelCallLogEntry;
 };
 
 /** POST /api/plan (multipart/form-data with `video` file or JSON `{ videoBase64, mimeType, prompt? }`) */
@@ -135,8 +177,51 @@ export type PlanRequestJson = {
   mimeType?: string;
   durationSec?: number;
   userHint?: string;
+  mode?: ProjectMode;
 };
 export type PlanResponse = ScenePlan & {
+  usedModel: string;
+  modelLog?: ModelCallLogEntry;
+};
+
+/** POST /api/script */
+export type ScriptSceneDraft = {
+  id: string;
+  script: string;
+  caption: string;
+  visualIdea: string;
+  durationSec: number;
+  template?: SceneTemplate;
+  visuals?: string[];
+  insertAfterSceneId?: string;
+};
+export type ScriptRequest = {
+  mode: "append" | "from-scratch";
+  plan?: ScenePlan;
+  topic?: string;
+  notes?: string;
+  targetSceneCount?: number;
+};
+export type ScriptResponse = {
+  mode: "append" | "from-scratch";
+  scenes: ScriptSceneDraft[];
+  plan?: ScenePlan;
+  usedModel: string;
+  modelLog?: ModelCallLogEntry;
+};
+
+/** POST /api/tts */
+export type TtsRequest = {
+  text: string;
+  voiceId?: string;
+  style?: string;
+};
+/** Note: POST /api/tts returns binary `audio/wav` with header `X-Used-Model` (or JSON if `format: "json"` is passed) */
+export type TtsJsonResponse = {
+  audioBase64: string;
+  mimeType: "audio/wav";
+  usedModel: string;
+  durationSec?: number;
   modelLog?: ModelCallLogEntry;
 };
 
@@ -148,6 +233,7 @@ export type SceneCodeRequest = {
   height?: number;
 };
 export type SceneCodeResponse = SceneCode & {
+  usedModel: string;
   modelLog?: ModelCallLogEntry;
 };
 
@@ -162,6 +248,7 @@ export type FixCodeRequest = {
   height?: number;
 };
 export type FixCodeResponse = SceneCode & {
+  usedModel: string;
   modelLog?: ModelCallLogEntry;
 };
 
@@ -180,6 +267,7 @@ export type VerifyRequest = {
   retried?: boolean;
 };
 export type VerifyResponse = VerifyReport & {
+  usedModel: string;
   modelLog?: ModelCallLogEntry;
 };
 
@@ -193,12 +281,16 @@ export type ReviseRequest = {
 export type ReviseResponse = {
   plan: ScenePlan;
   updatedSceneCode?: SceneCode;
+  usedModel: string;
   modelLog?: ModelCallLogEntry;
 };
 
 export const API_ENDPOINTS = {
   HEALTH: "/api/health",
+  VOICE_CLONE: "/api/voice/clone",
   PLAN: "/api/plan",
+  SCRIPT: "/api/script",
+  TTS: "/api/tts",
   SCENE_CODE: "/api/scene-code",
   FIX_CODE: "/api/fix-code",
   VERIFY: "/api/verify",
