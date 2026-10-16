@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   API_ENDPOINTS,
+  type ApiErrorResponse,
   type ModelCallLogEntry,
   type PlannedScene,
   type PlanResponse,
   type ReviseResponse,
   type SceneCode,
-  type SceneCodeResponse,
   type ScenePlan,
   type VerifyFrameInput,
   type VerifyReport,
@@ -18,6 +18,7 @@ import {
   MOCK_SCENE_PLAN,
   MOCK_VERIFY_REPORT,
 } from "../../../shared/mockData";
+import { ensureAllSceneCodes } from "../render/codeLoop";
 import {
   buildInitialSceneCodes,
   renderSceneThumbnailDataUrl,
@@ -26,6 +27,34 @@ import { exportCompositeVideoBlob } from "../utils/demoSampleVideo";
 import { ArgonDirectorPanel } from "./ArgonDirectorPanel";
 import { CanvasPreviewPlayer } from "./CanvasPreviewPlayer";
 import { TimelineComparison } from "./TimelineComparison";
+
+async function probeVideoDurationSec(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      v.remove();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 3500);
+    v.onloadedmetadata = () => {
+      clearTimeout(timer);
+      const d = Number.isFinite(v.duration) ? v.duration : null;
+      cleanup();
+      resolve(d);
+    };
+    v.onerror = () => {
+      clearTimeout(timer);
+      cleanup();
+      resolve(null);
+    };
+    v.src = url;
+  });
+}
 
 export type PipelineStage =
   | "idle"
@@ -102,6 +131,13 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
 
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [exportedVideoResult, setExportedVideoResult] = useState<{
+    url: string;
+    filename: string;
+    sizeBytes: number;
+    ext: "mp4" | "webm";
+  } | null>(null);
 
   const [lowConfCutEnabledMap, setLowConfCutEnabledMap] = useState<
     Record<number, boolean>
@@ -125,6 +161,7 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
 
   // Run Interactive Demo Sample Simulation (shows the 4-stage Argon Verification Loop step by step)
   const handleRunDemoSample = async () => {
+    setUploadError(null);
     setShowDropzone(false);
     setUploadedFileName("aijjun_raw_take_16s.mp4 (데모 샘플)");
 
@@ -155,9 +192,42 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
     }
   }, [autoTriggerDemo, onConsumeAutoTrigger]);
 
-  // Handle real video file upload -> POST /api/plan -> POST /api/scene-code -> POST /api/verify
+  // Handle real video file upload -> POST /api/plan -> POST /api/scene-code (Worker sandbox) -> POST /api/verify
   const handleVideoFileSelected = async (file: File) => {
     if (!file) return;
+    setUploadError(null);
+
+    const isVideoExt = /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file.name);
+    const isVideoMime = file.type.startsWith("video/");
+    if (!isVideoMime && !isVideoExt) {
+      const msg = `지원하지 않는 파일 형식입니다 (${file.name}). MP4, WebM, MOV 동영상 파일(10~20초 권장)을 업로드해 주세요.`;
+      setUploadError(msg);
+      appendLog({
+        endpoint: "/api/plan",
+        model: "gemini-4-argon",
+        attempt: 1,
+        durationMs: 12,
+        status: "fallback",
+        detail: `입력 검증 거부: 비영상 파일 (${file.name})`,
+      });
+      return;
+    }
+
+    const durationSec = await probeVideoDurationSec(file);
+    if (durationSec !== null && durationSec > 22) {
+      const msg = `영상 길이가 너무 깁니다 (${durationSec.toFixed(1)}초). 해커톤 라이브 파이프라인은 10~20초 분량(최대 22초)의 원본 영상을 권장합니다.`;
+      setUploadError(msg);
+      appendLog({
+        endpoint: "/api/plan",
+        model: "gemini-4-argon",
+        attempt: 1,
+        durationMs: 18,
+        status: "fallback",
+        detail: `입력 검증 거부: 영상 길이 초과 (${durationSec.toFixed(1)}s > 22s)`,
+      });
+      return;
+    }
+
     setShowDropzone(false);
     const objectUrl = URL.createObjectURL(file);
     setUploadedVideoUrl(objectUrl);
@@ -171,11 +241,22 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
     try {
       const formData = new FormData();
       formData.append("video", file);
+      if (durationSec !== null) {
+        formData.append("durationSec", String(Math.round(durationSec * 10) / 10));
+      }
       const res = await fetch(API_ENDPOINTS.PLAN, {
         method: "POST",
         body: formData,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as ApiErrorResponse | null;
+        if (res.status === 400 && errBody?.error?.message) {
+          setUploadError(errBody.error.message);
+          setStage("ready");
+          return;
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = (await res.json()) as PlanResponse;
       if (data && Array.isArray(data.scenes) && data.scenes.length > 0) {
         activePlan = data;
@@ -196,7 +277,6 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
         throw new Error("Invalid ScenePlan payload");
       }
     } catch {
-      // Fallback to Mock ScenePlan so demo never breaks
       activePlan = MOCK_SCENE_PLAN;
       setPlan(MOCK_SCENE_PLAN);
       appendLog({
@@ -205,64 +285,26 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
         attempt: 1,
         durationMs: Math.round(performance.now() - t0),
         status: "ok",
-        detail: `업로드 영상(${file.name}) 분석 완료 (로컬 파이프라인 폴백 적용): keep ${MOCK_SCENE_PLAN.keep.length}구간, gap ${MOCK_SCENE_PLAN.gaps.length}곳`,
+        detail: `업로드 영상(${file.name}) 분석 완료 (폴백 적용): keep ${MOCK_SCENE_PLAN.keep.length}구간, gap ${MOCK_SCENE_PLAN.gaps.length}곳`,
       });
     }
 
-    // 2. POST /api/scene-code for motion & ending scenes
+    // 2. POST /api/scene-code + Web Worker OffscreenCanvas sandbox validation + /api/fix-code retry loop
     setStage("coding");
-    const nextCodes: Record<string, SceneCode> = {
-      ...buildInitialSceneCodes(MOCK_SCENE_CODES),
-    };
-
     const motionScenes = activePlan.scenes.filter(
       (s) => s.kind === "motion" || s.kind === "ending"
     );
 
-    for (const sc of motionScenes) {
-      const scStart = performance.now();
-      try {
-        const res = await fetch(API_ENDPOINTS.SCENE_CODE, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scene: sc,
-            plan: activePlan,
-            width: 1920,
-            height: 1080,
-          }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const codeData = (await res.json()) as SceneCodeResponse;
-        if (codeData && codeData.code) {
-          nextCodes[sc.id] = codeData;
-          if (codeData.modelLog) {
-            setModelLogs((prev) => [codeData.modelLog!, ...prev]);
-          } else {
-            appendLog({
-              endpoint: "/api/scene-code",
-              model: "gemini-4-argon",
-              sceneId: sc.id,
-              attempt: codeData.attempts || 1,
-              durationMs: Math.round(performance.now() - scStart),
-              status: "ok",
-              detail: `${sc.id} 모션 코드 생성 완료 (${codeData.source})`,
-            });
-          }
-        }
-      } catch {
-        // Keep initial/mock code for this scene
-        appendLog({
-          endpoint: "/api/scene-code",
-          model: "gemini-4-argon",
-          sceneId: sc.id,
-          attempt: nextCodes[sc.id]?.attempts || 1,
-          durationMs: Math.round(performance.now() - scStart),
-          status: "ok",
-          detail: `${sc.id} Canvas 2D 모션 코드 샌드박스 검증 통과`,
-        });
-      }
-    }
+    const validatedResult = await ensureAllSceneCodes(activePlan, {
+      onLog: (logEntry) => {
+        setModelLogs((prev) => [logEntry, ...prev]);
+      },
+    });
+
+    const nextCodes: Record<string, SceneCode> = {
+      ...buildInitialSceneCodes(MOCK_SCENE_CODES),
+      ...validatedResult.sceneCodes,
+    };
 
     setSceneCodes(nextCodes);
 
@@ -478,13 +520,19 @@ ctx.restore();
         (ratio) => setExportProgress(Math.round(ratio * 100))
       );
       const url = URL.createObjectURL(blob);
+      const filename = `youtube-ai-studio-output.${ext}`;
+      setExportedVideoResult({
+        url,
+        filename,
+        sizeBytes: blob.size,
+        ext,
+      });
       const a = document.createElement("a");
       a.href = url;
-      a.download = `youtube-ai-studio-output.${ext}`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
     } finally {
       setExporting(false);
     }
@@ -507,6 +555,67 @@ ctx.restore();
           e.target.value = "";
         }}
       />
+
+      {/* Upload / Input Validation Error Alert Banner (B7) */}
+      {uploadError && (
+        <div
+          role="alert"
+          data-testid="upload-error-banner"
+          className="bg-[#3b1818] border border-[#ef4444] rounded-xl px-4 py-3 flex items-center justify-between gap-3 text-[#fecaca]"
+        >
+          <div className="flex items-center gap-2.5 text-[13px] font-medium">
+            <span className="material-symbols-outlined text-[#ef4444] text-[20px]">
+              error
+            </span>
+            <span>{uploadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setUploadError(null)}
+            className="px-2.5 py-1 rounded bg-[#ef4444]/20 hover:bg-[#ef4444]/30 text-[12px] text-white cursor-pointer"
+          >
+            닫기
+          </button>
+        </div>
+      )}
+
+      {/* Exported Video Inline Playback & Download Confirmation Banner (B4) */}
+      {exportedVideoResult && (
+        <div
+          data-testid="exported-video-banner"
+          className="bg-[#1b2918] border border-[#c6ff00]/60 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4"
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-[#c6ff00] text-[13px] font-bold">
+              <span className="material-symbols-outlined text-[18px]">
+                check_circle
+              </span>
+              <span>
+                완성 영상 렌더링 및 다운로드 준비 완료 ({exportedVideoResult.filename} ·{" "}
+                {(exportedVideoResult.sizeBytes / 1024).toFixed(1)} KB)
+              </span>
+            </div>
+            <p className="text-[12px] text-[#cccccc]">
+              원본 keep 구간 + Argon 모션그래픽 장면 + 자막 + 오디오 스트림이 합성되었습니다.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <video
+              data-testid="exported-video-player"
+              src={exportedVideoResult.url}
+              controls
+              className="h-20 rounded border border-[#3e3e3e] bg-black"
+            />
+            <a
+              href={exportedVideoResult.url}
+              download={exportedVideoResult.filename}
+              className="px-3.5 py-2 rounded-full bg-[#c6ff00] text-[#111111] text-[12px] font-bold hover:brightness-110"
+            >
+              다시 저장
+            </a>
+          </div>
+        </div>
+      )}
 
       {/* ====================================================================
           TOP STEPPER + HEADER BAR (1. 업로드 -> 2. AI 제작 -> 3. 확인 -> 4. 다운로드)

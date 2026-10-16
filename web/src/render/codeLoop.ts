@@ -309,19 +309,24 @@ export async function ensureAllSceneCodes(
     (s) => s.kind === "motion" || s.kind === "ending"
   );
 
-  for (const scene of targetScenes) {
-    const existing = options.initialCodes?.[scene.id];
-    const initialCode =
-      typeof existing === "string" ? existing : existing?.code;
+  const results = await Promise.all(
+    targetScenes.map(async (scene) => {
+      const existing = options.initialCodes?.[scene.id];
+      const initialCode =
+        typeof existing === "string" ? existing : existing?.code;
 
-    const result = await ensureValidSceneCode(scene, plan, {
-      ...options,
-      initialCode,
-    });
+      const result = await ensureValidSceneCode(scene, plan, {
+        ...options,
+        initialCode,
+      });
+      return { sceneId: scene.id, result };
+    })
+  );
 
-    sceneCodes[scene.id] = result.sceneCode;
+  for (const { sceneId, result } of results) {
+    sceneCodes[sceneId] = result.sceneCode;
     if (result.keyframeBase64) {
-      keyframes[scene.id] = result.keyframeBase64;
+      keyframes[sceneId] = result.keyframeBase64;
     }
     allLogs.push(...result.logs);
   }

@@ -239,17 +239,26 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
     const blob = await canvas.convertToBlob({ type: "image/png" });
     const arrayBuffer = await blob.arrayBuffer();
     const imageBase64 = await arrayBufferToBase64Png(arrayBuffer);
-    const bitmap = canvas.transferToImageBitmap();
+    let bitmap: ImageBitmap | undefined;
+    try {
+      bitmap = canvas.transferToImageBitmap();
+    } catch {
+      bitmap = undefined;
+    }
 
     const resp: WorkerRenderResponse = {
       id: req.id,
       ok: true,
       imageBase64,
-      bitmap,
+      ...(bitmap ? { bitmap } : {}),
       frameChecks,
       renderDurationMs: Math.round(performance.now() - startMs),
     };
-    (self as unknown as DedicatedWorkerGlobalScope).postMessage(resp, [bitmap]);
+    if (bitmap) {
+      (self as unknown as DedicatedWorkerGlobalScope).postMessage(resp, [bitmap]);
+    } else {
+      self.postMessage(resp);
+    }
   } catch (err) {
     const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     const resp: WorkerRenderResponse = {

@@ -19,7 +19,8 @@ export async function exportCompositeVideoBlob(
   const ctx = canvas.getContext("2d")!;
 
   const mp4Mime = "video/mp4;codecs=avc1";
-  const webmMime = "video/webm;codecs=vp9";
+  const webmMime = "video/webm;codecs=vp9,opus";
+  const webmFallback = "video/webm";
   const mimeType =
     typeof MediaRecorder !== "undefined" &&
     MediaRecorder.isTypeSupported(mp4Mime)
@@ -27,11 +28,40 @@ export async function exportCompositeVideoBlob(
       : typeof MediaRecorder !== "undefined" &&
           MediaRecorder.isTypeSupported(webmMime)
         ? webmMime
-        : "video/webm";
+        : webmFallback;
 
   const ext: "mp4" | "webm" = mimeType.includes("mp4") ? "mp4" : "webm";
 
   const stream = canvas.captureStream(30);
+
+  // Add synthesized studio audio track via WebAudio so exported video always contains an audio stream
+  let audioCtx: AudioContext | null = null;
+  let osc: OscillatorNode | null = null;
+  try {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (AudioCtx) {
+      audioCtx = new AudioCtx();
+      const dest = audioCtx.createMediaStreamDestination();
+      osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
+      osc.connect(gain);
+      gain.connect(dest);
+      osc.start();
+      const audioTrack = dest.stream.getAudioTracks()[0];
+      if (audioTrack) {
+        stream.addTrack(audioTrack);
+      }
+    }
+  } catch {
+    // Proceed with video-only stream if AudioContext is blocked
+  }
+
   const recorder = new MediaRecorder(stream, {
     mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : undefined,
     videoBitsPerSecond: 4_000_000,
@@ -50,9 +80,9 @@ export async function exportCompositeVideoBlob(
 
   recorder.start(100);
 
-  // Render a fast preview summary reel (~2.4 seconds real-time sampling across all scenes)
+  // Render a ~4.0 second composite reel across all scenes
   const totalVirtualSec = plan.scenes.reduce((acc, s) => acc + s.durationSec, 0);
-  const steps = 60;
+  const steps = 120;
   for (let i = 0; i <= steps; i++) {
     const ratio = i / steps;
     onProgress?.(ratio);
@@ -61,13 +91,24 @@ export async function exportCompositeVideoBlob(
     let acc = 0;
     let activeScene = plan.scenes[0];
     let localT = 0;
-    for (const sc of plan.scenes) {
+    let sceneIdx = 0;
+    for (let idx = 0; idx < plan.scenes.length; idx++) {
+      const sc = plan.scenes[idx];
       if (virtualTime <= acc + sc.durationSec) {
         activeScene = sc;
         localT = virtualTime - acc;
+        sceneIdx = idx;
         break;
       }
       acc += sc.durationSec;
+    }
+
+    if (osc && audioCtx) {
+      const freqs = [220, 330, 261.63, 392, 440];
+      osc.frequency.setValueAtTime(
+        freqs[sceneIdx % freqs.length],
+        audioCtx.currentTime
+      );
     }
 
     ctx.save();
@@ -86,11 +127,17 @@ export async function exportCompositeVideoBlob(
     }
     ctx.restore();
 
-    await new Promise((r) => setTimeout(r, 32));
+    await new Promise((r) => setTimeout(r, 33));
   }
 
   recorder.stop();
   const blob = await stopped;
+  try {
+    osc?.stop();
+    await audioCtx?.close();
+  } catch {
+    // ignore cleanup errors
+  }
   onProgress?.(1);
   return { blob, ext };
 }

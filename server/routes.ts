@@ -158,11 +158,63 @@ apiRouter.post(
           ? body.prompt
           : undefined;
 
+      // Validate video duration if provided (e.g. reject > 22s videos with a friendly error message)
+      if (durationSec !== undefined && !Number.isNaN(durationSec)) {
+        if (durationSec <= 0) {
+          sendApiError(
+            res,
+            400,
+            "INVALID_VIDEO_DURATION",
+            "영상 길이가 올바르지 않습니다(0초 이하). 정상적인 동영상 파일을 업로드해 주세요.",
+            false
+          );
+          return;
+        }
+        if (durationSec > 22) {
+          sendApiError(
+            res,
+            400,
+            "VIDEO_TOO_LONG",
+            `업로드한 영상 길이(${durationSec.toFixed(1)}초)가 권장 범위(10~20초, 최대 22초)를 초과했습니다. 20초 이내의 짧은 원본 클립을 업로드해 주세요.`,
+            false
+          );
+          return;
+        }
+      }
+
       const mediaParts: Part[] = [];
 
       if (uploadedFile && uploadedFile.path) {
-        const mimeType = uploadedFile.mimetype || "video/mp4";
+        const mimeType = (uploadedFile.mimetype || "").toLowerCase();
+        const ext = path.extname(uploadedFile.originalname || "").toLowerCase();
+        const validVideoExts = [".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"];
+        const isVideoMime = mimeType.startsWith("video/");
+        const isVideoExt = validVideoExts.includes(ext);
+
+        if (!isVideoMime && !isVideoExt) {
+          sendApiError(
+            res,
+            400,
+            "INVALID_FILE_TYPE",
+            `영상이 아닌 파일(${uploadedFile.originalname || mimeType || "알 수 없는 형식"})은 분석할 수 없습니다. MP4, WebM, MOV 형식의 동영상 파일을 업로드해 주세요.`,
+            false
+          );
+          return;
+        }
+
+        const effectiveMime = isVideoMime ? mimeType : "video/mp4";
         const fileStat = await fs.promises.stat(uploadedFile.path);
+        if (fileStat.size === 0) {
+          sendApiError(
+            res,
+            400,
+            "EMPTY_VIDEO_FILE",
+            "업로드한 영상 파일이 비어 있습니다(0바이트). 정상적인 동영상 파일을 선택해 주세요.",
+            false
+          );
+          return;
+        }
+
         const client = getGenAIClient();
 
         // Use Files API for large files (> 15MB) if client is available, otherwise inlineData
@@ -170,13 +222,13 @@ apiRouter.post(
           try {
             const uploaded = await client.files.upload({
               file: uploadedFile.path,
-              config: { mimeType },
+              config: { mimeType: effectiveMime },
             });
             if (uploaded.uri) {
               mediaParts.push({
                 fileData: {
                   fileUri: uploaded.uri,
-                  mimeType: uploaded.mimeType || mimeType,
+                  mimeType: uploaded.mimeType || effectiveMime,
                 },
               });
             }
@@ -191,7 +243,7 @@ apiRouter.post(
           const buf = await fs.promises.readFile(uploadedFile.path);
           mediaParts.push({
             inlineData: {
-              mimeType,
+              mimeType: effectiveMime,
               data: buf.toString("base64"),
             },
           });
@@ -201,12 +253,31 @@ apiRouter.post(
           body.videoBase64,
           body.mimeType || "video/mp4"
         );
+        if (!mimeType.toLowerCase().startsWith("video/")) {
+          sendApiError(
+            res,
+            400,
+            "INVALID_FILE_TYPE",
+            `영상이 아닌 데이터 형식(${mimeType})입니다. 동영상(video/mp4, video/webm) 파일만 업로드해 주세요.`,
+            false
+          );
+          return;
+        }
         mediaParts.push({
           inlineData: {
             mimeType,
             data: base64Data,
           },
         });
+      } else if (!userHint || !userHint.trim()) {
+        sendApiError(
+          res,
+          400,
+          "EMPTY_PLAN_REQUEST",
+          "분석할 원본 영상 파일이 없습니다. 10~20초 분량의 동영상 파일(MP4, WebM, MOV)을 업로드해 주세요.",
+          false
+        );
+        return;
       }
 
       // Attempt 1: Call Argon with multimodal input + JSON schema
@@ -256,7 +327,7 @@ apiRouter.post(
               detail:
                 attempt > 1
                   ? `Zod 스키마 재시도 통과 (${attempt}회차): keep ${validated.data.keep.length}구간, cut ${validated.data.cuts.length}구간, 장면 ${validated.data.scenes.length}개`
-                  : `멀티모달 영상 분석 완료: keep ${validated.data.keep.length}구간, cut ${validated.data.cuts.length}구간, 장면 ${validated.data.scenes.length}개`,
+                  : `멀티모달 영상 분석 완료 (${callResult.usedModel}): keep ${validated.data.keep.length}구간, cut ${validated.data.cuts.length}구간, 장면 ${validated.data.scenes.length}개`,
             },
           };
           res.json(responsePayload);
@@ -371,8 +442,8 @@ apiRouter.post(
               status: attempt > 1 || callResult.fellBackModel ? "retry" : "ok",
               detail:
                 attempt > 1
-                  ? `1차 문법/토큰 검증 후 재시도 통과: draw(ctx,t,w,h,scene) 생성 완료`
-                  : `draw(ctx,t,w,h,scene) 생성 및 서버 정적 검증 통과`,
+                  ? `1차 문법/토큰 검증 후 재시도 통과 (${callResult.usedModel}): draw(ctx,t,w,h,scene) 생성 완료`
+                  : `draw(ctx,t,w,h,scene) 생성 및 서버 정적 검증 통과 (${callResult.usedModel})`,
             }),
           };
           res.json(payload);
@@ -391,17 +462,17 @@ apiRouter.post(
       const payload: SceneCodeResponse = {
         sceneId: scene.id,
         code: fallbackCode,
-        attempts: 1,
-        source: "argon-code",
+        attempts: 2,
+        source: "template-fallback",
         ...(lastErrorMsg ? { lastError: lastErrorMsg } : {}),
         modelLog: createModelLog({
           endpoint: "/api/scene-code",
           model: getArgonModel(),
           sceneId: scene.id,
-          attempt: 1,
+          attempt: 2,
           durationMs: Math.max(1, totalDurationMs),
           status: "fallback",
-          detail: `안전한 결정적 Canvas 2D 모션 코드 생성 완료 (${scene.id})`,
+          detail: `결정적 Canvas 2D 템플릿 폴백 적용 (${scene.id})`,
         }),
       };
       res.json(payload);

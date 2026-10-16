@@ -2,6 +2,7 @@ node_modules
 .git
 .worktrees
 reference
+docs/demo
 .env
 .env.*
 *.log
