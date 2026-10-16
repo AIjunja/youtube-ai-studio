@@ -7,16 +7,23 @@ import {
   type SceneCode,
   type SceneCodeRequest,
   type SceneCodeResponse,
+  type SceneCodeSource,
   type ScenePlan,
 } from "../../../shared/contract";
 import {
+  DEFAULT_TEST_HEIGHT,
+  DEFAULT_TEST_WIDTH,
   validateAndRenderInSandbox,
   type SandboxRunResult,
 } from "./sandboxRunner";
 import { createFallbackSceneCode } from "./templates";
 
+export { DEFAULT_TEST_WIDTH, DEFAULT_TEST_HEIGHT };
+
 export interface EnsureSceneCodeOptions {
   initialCode?: string;
+  initialSource?: SceneCodeSource;
+  initialUsedModel?: string;
   maxFixRetries?: number;
   width?: number;
   height?: number;
@@ -47,12 +54,8 @@ function makeLogEntry(
 }
 
 /**
- * Ensures a single `motion` or `ending` scene has verified, non-blank Canvas 2D code.
- * Flow:
- * 1. Generate initial code via `POST /api/scene-code` (or use `options.initialCode`).
- * 2. Run static + Worker OffscreenCanvas + blank-frame checks.
- * 3. On failure, call `POST /api/fix-code` with `errorLog` up to `maxFixRetries` (default 2) times.
- * 4. If still failing after 2 fix attempts, return deterministic template fallback (`source: "template-fallback"`).
+ * Ensures a single `motion` or `ending` scene has verified, non-blank Canvas 2D code
+ * at unified 1920x1080 resolution, preserving `source` and `usedModel` honestly.
  */
 export async function ensureValidSceneCode(
   scene: PlannedScene,
@@ -60,8 +63,8 @@ export async function ensureValidSceneCode(
   options: EnsureSceneCodeOptions = {}
 ): Promise<EnsureSceneCodeResult> {
   const maxFixRetries = options.maxFixRetries ?? 2;
-  const width = options.width ?? 960;
-  const height = options.height ?? 540;
+  const width = options.width ?? DEFAULT_TEST_WIDTH;
+  const height = options.height ?? DEFAULT_TEST_HEIGHT;
   const fetchFn = options.fetchImpl ?? fetch;
   const logs: ModelCallLogEntry[] = [];
 
@@ -71,6 +74,9 @@ export async function ensureValidSceneCode(
   };
 
   let candidateCode = options.initialCode ?? "";
+  let candidateSource: SceneCodeSource =
+    options.initialSource ?? "argon-code";
+  let candidateUsedModel: string | undefined = options.initialUsedModel;
   let attempts = 0;
   let lastError: string | undefined;
 
@@ -97,18 +103,31 @@ export async function ensureValidSceneCode(
 
       const data = (await res.json()) as SceneCodeResponse;
       candidateCode = data.code || "";
+      // Preserve actual source and usedModel returned by the server
+      candidateSource =
+        data.source === "template-fallback"
+          ? "template-fallback"
+          : "argon-code";
+      candidateUsedModel = data.usedModel;
+
       if (data.modelLog) {
-        pushLog(data.modelLog);
+        pushLog({
+          ...data.modelLog,
+          model: data.usedModel || data.modelLog.usedModel || data.modelLog.model,
+          usedModel: data.usedModel || data.modelLog.usedModel,
+        });
       } else {
         pushLog(
           makeLogEntry({
             endpoint: "/api/scene-code",
-            model: "gemini-4-argon",
+            model: data.usedModel || "gemini-4-argon",
+            usedModel: data.usedModel,
             sceneId: scene.id,
             attempt: 1,
             durationMs: Math.round(performance.now() - reqStart),
-            status: "ok",
-            detail: `초기 모션 코드 수신 (${scene.id})`,
+            status:
+              candidateSource === "template-fallback" ? "fallback" : "ok",
+            detail: `모션 코드 수신 (${scene.id})`,
           })
         );
       }
@@ -117,7 +136,7 @@ export async function ensureValidSceneCode(
       pushLog(
         makeLogEntry({
           endpoint: "/api/scene-code",
-          model: "gemini-4-argon",
+          model: "error",
           sceneId: scene.id,
           attempt: 1,
           durationMs: Math.round(performance.now() - reqStart),
@@ -145,7 +164,13 @@ export async function ensureValidSceneCode(
           sceneId: scene.id,
           code: sandboxRes.normalizedCode,
           attempts,
-          source: "argon-code",
+          source: candidateSource,
+          usedModel:
+            candidateUsedModel ??
+            (candidateSource === "template-fallback"
+              ? "template-fallback"
+              : undefined),
+          ...(lastError ? { lastError } : {}),
         };
         return {
           sceneCode: verifiedSceneCode,
@@ -160,8 +185,8 @@ export async function ensureValidSceneCode(
       lastError = "Empty scene code returned from model";
     }
 
-    // Check if we have remaining fix retries
-    if (fixIndex >= maxFixRetries) {
+    // If the code came from template-fallback or we exhausted fix retries, stop retrying
+    if (candidateSource === "template-fallback" || fixIndex >= maxFixRetries) {
       break;
     }
 
@@ -172,7 +197,8 @@ export async function ensureValidSceneCode(
     pushLog(
       makeLogEntry({
         endpoint: "/api/fix-code",
-        model: "gemini-4-argon",
+        model: candidateUsedModel || "gemini-4-argon",
+        usedModel: candidateUsedModel,
         sceneId: scene.id,
         attempt: nextAttempt,
         durationMs: 0,
@@ -203,52 +229,40 @@ export async function ensureValidSceneCode(
 
       const data = (await res.json()) as FixCodeResponse;
       candidateCode = data.code || "";
+      candidateSource =
+        data.source === "template-fallback"
+          ? "template-fallback"
+          : "argon-code";
+      candidateUsedModel = data.usedModel || candidateUsedModel;
 
       if (data.modelLog) {
-        pushLog(data.modelLog);
+        pushLog({
+          ...data.modelLog,
+          model: data.usedModel || data.modelLog.usedModel || data.modelLog.model,
+          usedModel: data.usedModel || data.modelLog.usedModel,
+        });
       } else {
         pushLog(
           makeLogEntry({
             endpoint: "/api/fix-code",
-            model: "gemini-4-argon",
+            model: data.usedModel || candidateUsedModel || "gemini-4-argon",
+            usedModel: data.usedModel || candidateUsedModel,
             sceneId: scene.id,
             attempt: nextAttempt,
             durationMs: Math.round(performance.now() - fixStart),
-            status: data.source === "template-fallback" ? "fallback" : "ok",
+            status:
+              candidateSource === "template-fallback" ? "fallback" : "ok",
             detail: `${fixIndex + 1}차 수정 코드 수신 (${scene.id})`,
           })
         );
-      }
-
-      if (data.source === "template-fallback" && candidateCode.trim()) {
-        // Server already fell back to a template; verify it in sandbox and return
-        const fbCheck = await validateAndRenderInSandbox({
-          code: candidateCode,
-          scene,
-          width,
-          height,
-        });
-        if (fbCheck.ok) {
-          return {
-            sceneCode: {
-              sceneId: scene.id,
-              code: fbCheck.normalizedCode,
-              attempts,
-              source: "template-fallback",
-              lastError,
-            },
-            keyframeBase64: fbCheck.imageBase64,
-            keyframeBitmap: fbCheck.bitmap,
-            logs,
-          };
-        }
       }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       pushLog(
         makeLogEntry({
           endpoint: "/api/fix-code",
-          model: "gemini-4-argon",
+          model: candidateUsedModel || "error",
+          usedModel: candidateUsedModel,
           sceneId: scene.id,
           attempt: nextAttempt,
           durationMs: Math.round(performance.now() - fixStart),
@@ -259,8 +273,13 @@ export async function ensureValidSceneCode(
     }
   }
 
-  // Step 4: Deterministic Canvas 2D Template Fallback (Guaranteed non-breaking)
-  const fallbackSceneCode = createFallbackSceneCode(scene, attempts, lastError);
+  // Step 4: Deterministic Canvas 2D Template Fallback (Guaranteed non-breaking, honest source)
+  const fallbackSceneCode = createFallbackSceneCode(
+    scene,
+    attempts,
+    lastError,
+    "template-fallback"
+  );
   const fallbackRender = await validateAndRenderInSandbox({
     code: fallbackSceneCode.code,
     scene,
@@ -271,12 +290,13 @@ export async function ensureValidSceneCode(
   pushLog(
     makeLogEntry({
       endpoint: "/api/fix-code",
-      model: "gemini-4-argon",
+      model: "template-fallback",
+      usedModel: "template-fallback",
       sceneId: scene.id,
       attempt: attempts,
       durationMs: fallbackRender.renderDurationMs,
       status: "fallback",
-      detail: `최대 수정 횟수(${maxFixRetries}회) 초과 → 결정적 Canvas 2D 템플릿 폴백 적용 (${scene.id})`,
+      detail: `결정적 Canvas 2D 템플릿 폴백 적용 (${scene.id})`,
     })
   );
 
@@ -289,11 +309,15 @@ export async function ensureValidSceneCode(
 }
 
 /**
- * Generates and validates scene code for all `"motion"` and `"ending"` scenes in a `ScenePlan`.
+ * Generates and validates scene code for all `"motion"` and `"ending"` scenes in a `ScenePlan`
+ * at unified 1920x1080 resolution.
  */
 export async function ensureAllSceneCodes(
   plan: ScenePlan,
-  options: Omit<EnsureSceneCodeOptions, "initialCode"> & {
+  options: Omit<
+    EnsureSceneCodeOptions,
+    "initialCode" | "initialSource" | "initialUsedModel"
+  > & {
     initialCodes?: Record<string, SceneCode | string>;
   } = {}
 ): Promise<{
@@ -309,24 +333,25 @@ export async function ensureAllSceneCodes(
     (s) => s.kind === "motion" || s.kind === "ending"
   );
 
-  const results = await Promise.all(
-    targetScenes.map(async (scene) => {
-      const existing = options.initialCodes?.[scene.id];
-      const initialCode =
-        typeof existing === "string" ? existing : existing?.code;
+  for (const scene of targetScenes) {
+    const existing = options.initialCodes?.[scene.id];
+    const initialCode =
+      typeof existing === "string" ? existing : existing?.code;
+    const initialSource =
+      typeof existing === "object" && existing ? existing.source : undefined;
+    const initialUsedModel =
+      typeof existing === "object" && existing ? existing.usedModel : undefined;
 
-      const result = await ensureValidSceneCode(scene, plan, {
-        ...options,
-        initialCode,
-      });
-      return { sceneId: scene.id, result };
-    })
-  );
+    const result = await ensureValidSceneCode(scene, plan, {
+      ...options,
+      initialCode,
+      initialSource,
+      initialUsedModel,
+    });
 
-  for (const { sceneId, result } of results) {
-    sceneCodes[sceneId] = result.sceneCode;
+    sceneCodes[scene.id] = result.sceneCode;
     if (result.keyframeBase64) {
-      keyframes[sceneId] = result.keyframeBase64;
+      keyframes[scene.id] = result.keyframeBase64;
     }
     allLogs.push(...result.logs);
   }

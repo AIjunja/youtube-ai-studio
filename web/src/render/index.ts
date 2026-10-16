@@ -1,4 +1,31 @@
 export {
+  MOTION_DESIGN,
+  ensureMotionFontsLoaded,
+  clamp01,
+  easeOutExpo,
+  easeOutCubic,
+  easeOutBack,
+  spring,
+  fitAndWrapText,
+  drawWrappedText,
+  createMotionKit,
+  type AnyCanvas2DContext,
+  type WrappedTextResult,
+  type SlamOptions,
+  type FullOptions,
+  type CardOptions,
+  type ChipOptions,
+  type NumberedOptions,
+  type ChatOptions,
+  type FlowStepItem,
+  type FlowOptions,
+  type ArrowOptions,
+  type BoxOptions,
+  type CaptionOptions,
+  type MotionKit,
+} from "./motionKit";
+
+export {
   inferSceneTemplate,
   getTemplateCode,
   drawTemplateFallback,
@@ -39,6 +66,8 @@ export {
   type VisualVerificationOptions,
   type VisualVerificationResult,
 } from "./keyframeExtractor";
+
+export { refinePlanCutsWithAudio } from "./audioCutAnalyzer";
 
 export {
   buildTimeline,
@@ -87,7 +116,7 @@ export interface FullRenderPipelineResult {
 
 /**
  * Convenience orchestrator for UI integration:
- * 1. Generates & validates all motion/ending scene codes in the isolated Worker sandbox (max 2 fix retries + template fallback).
+ * 1. Generates & validates all motion/ending scene codes in the isolated Worker sandbox at 1920x1080 (max 2 fix retries + template fallback).
  * 2. Extracts representative PNG keyframes at `t = durationSec * 0.5`.
  * 3. Runs multimodal visual verification (`/api/verify`) with 1x regeneration/fallback on any flagged scene.
  */
@@ -95,16 +124,19 @@ export async function runFullRenderPipeline(
   plan: ScenePlan,
   options: FullRenderPipelineOptions = {}
 ): Promise<FullRenderPipelineResult> {
+  const width = options.width ?? 1920;
+  const height = options.height ?? 1080;
+
   const codeStep = await ensureAllSceneCodes(plan, {
     initialCodes: options.initialCodes,
-    width: options.width,
-    height: options.height,
+    width,
+    height,
     onLog: options.onLog,
   });
 
   const frames = await extractSceneKeyframes(plan, codeStep.sceneCodes, {
-    width: options.width,
-    height: options.height,
+    width,
+    height,
     cachedKeyframes: codeStep.keyframes,
   });
 
@@ -119,6 +151,7 @@ export async function runFullRenderPipeline(
       verifyReport: {
         passed: true,
         retried: false,
+        verificationMode: "structural-check",
         checks: frames.map((f) => ({
           sceneId: f.sceneId,
           ok: true,
@@ -135,8 +168,8 @@ export async function runFullRenderPipeline(
     codeStep.sceneCodes,
     frames,
     {
-      width: options.width,
-      height: options.height,
+      width,
+      height,
       onLog: options.onLog,
     }
   );

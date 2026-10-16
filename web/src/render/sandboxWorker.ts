@@ -1,4 +1,5 @@
 import type { PlannedScene } from "../../../shared/contract";
+import { createMotionKit, ensureMotionFontsLoaded } from "./motionKit";
 
 export interface WorkerRenderRequest {
   id: string;
@@ -30,8 +31,9 @@ export interface WorkerRenderResponse {
   renderDurationMs: number;
 }
 
-// Capture Function constructor before locking down Worker globals
+// Capture Function constructor and trigger font loading before locking down Worker globals
 const SafeFunction = Function;
+const fontsReadyPromise = ensureMotionFontsLoaded();
 
 // Harden Web Worker global environment against network/external access
 const BLOCKED_GLOBALS = [
@@ -69,7 +71,7 @@ function analyzeImageData(
 ): BlankFrameCheckResult {
   const data = imageData.data;
   const totalPixels = imageData.width * imageData.height;
-  // Sample every 4th pixel for fast, deterministic inspection
+  // Sample every 4th pixel for fast, deterministic inspection on 1920x1080
   const step = 4 * 4;
   let sampledCount = 0;
   let nonZeroAlpha = 0;
@@ -160,8 +162,10 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
   if (!req || !req.id) return;
 
   try {
-    const width = Math.max(64, req.width || 960);
-    const height = Math.max(64, req.height || 540);
+    await fontsReadyPromise;
+
+    const width = Math.max(64, req.width || 1920);
+    const height = Math.max(64, req.height || 1080);
 
     if (typeof OffscreenCanvas === "undefined") {
       throw new Error("OffscreenCanvas is not supported in this Worker context");
@@ -173,13 +177,15 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
       "w",
       "h",
       "scene",
+      "kit",
       `"use strict";\n${req.code}`
     ) as (
       ctx: OffscreenCanvasRenderingContext2D,
       t: number,
       w: number,
       h: number,
-      scene: PlannedScene
+      scene: PlannedScene,
+      kit: ReturnType<typeof createMotionKit>
     ) => void;
 
     const canvas = new OffscreenCanvas(width, height);
@@ -188,7 +194,7 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
       throw new Error("Failed to acquire OffscreenCanvas 2D context");
     }
 
-    const durationSec = Math.max(1.0, req.scene?.durationSec || 4.0);
+    const durationSec = Math.max(2.0, req.scene?.durationSec || 4.0);
     const captureTime =
       typeof req.captureTime === "number" ? req.captureTime : durationSec * 0.5;
 
@@ -202,10 +208,11 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
     const frameChecks: BlankFrameCheckResult[] = [];
 
     for (const t of testTimes) {
+      const kit = createMotionKit(ctx, t, width, height, req.scene);
       ctx.save();
       ctx.clearRect(0, 0, width, height);
       try {
-        drawFn(ctx, t, width, height, req.scene);
+        drawFn(ctx, t, width, height, req.scene, kit);
       } finally {
         ctx.restore();
       }
@@ -228,10 +235,17 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
     }
 
     // Render final representative keyframe at captureTime
+    const captureKit = createMotionKit(
+      ctx,
+      captureTime,
+      width,
+      height,
+      req.scene
+    );
     ctx.save();
     ctx.clearRect(0, 0, width, height);
     try {
-      drawFn(ctx, captureTime, width, height, req.scene);
+      drawFn(ctx, captureTime, width, height, req.scene, captureKit);
     } finally {
       ctx.restore();
     }
@@ -239,28 +253,20 @@ self.onmessage = async (event: MessageEvent<WorkerRenderRequest>) => {
     const blob = await canvas.convertToBlob({ type: "image/png" });
     const arrayBuffer = await blob.arrayBuffer();
     const imageBase64 = await arrayBufferToBase64Png(arrayBuffer);
-    let bitmap: ImageBitmap | undefined;
-    try {
-      bitmap = canvas.transferToImageBitmap();
-    } catch {
-      bitmap = undefined;
-    }
+    const bitmap = canvas.transferToImageBitmap();
 
     const resp: WorkerRenderResponse = {
       id: req.id,
       ok: true,
       imageBase64,
-      ...(bitmap ? { bitmap } : {}),
+      bitmap,
       frameChecks,
       renderDurationMs: Math.round(performance.now() - startMs),
     };
-    if (bitmap) {
-      (self as unknown as DedicatedWorkerGlobalScope).postMessage(resp, [bitmap]);
-    } else {
-      self.postMessage(resp);
-    }
+    (self as unknown as DedicatedWorkerGlobalScope).postMessage(resp, [bitmap]);
   } catch (err) {
-    const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    const message =
+      err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     const resp: WorkerRenderResponse = {
       id: req.id,
       ok: false,
