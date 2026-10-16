@@ -6,6 +6,8 @@ import type {
 } from "./sandboxWorker";
 
 export const SANDBOX_FRAME_TIMEOUT_MS = 2000;
+export const DEFAULT_TEST_WIDTH = 1920;
+export const DEFAULT_TEST_HEIGHT = 1080;
 
 export const FORBIDDEN_IDENTIFIERS = [
   "fetch",
@@ -65,18 +67,20 @@ export interface SandboxRunResult {
 
 /**
  * Strips Markdown code fences and outer `function draw(...) { ... }` wrapper if present,
- * returning the pure function body expected by `draw(ctx, t, w, h, scene)`.
+ * returning the pure function body expected by `draw(ctx, t, w, h, scene, kit)`.
  */
 export function normalizeSceneCodeBody(rawCode: string): string {
   let code = (rawCode ?? "").trim();
 
   // Strip markdown code block fences if present
-  const fenceMatch = code.match(/^```(?:javascript|typescript|js|ts)?\s*\n([\s\S]*?)\n```$/i);
+  const fenceMatch = code.match(
+    /^```(?:javascript|typescript|js|ts)?\s*\n([\s\S]*?)\n```$/i
+  );
   if (fenceMatch) {
     code = fenceMatch[1].trim();
   }
 
-  // Strip outer `function draw(ctx, t, w, h, scene) { ... }` if Argon included the signature
+  // Strip outer `function draw(ctx, t, w, h, scene, kit) { ... }` if Argon included the signature
   const fnMatch = code.match(
     /^(?:export\s+)?function\s+draw\s*\([^)]*\)\s*\{([\s\S]*)\}\s*;?$/
   );
@@ -93,15 +97,10 @@ export function normalizeSceneCodeBody(rawCode: string): string {
  */
 function stripCommentsAndStrings(code: string): string {
   return code
-    // Remove multi-line comments
     .replace(/\/\*[\s\S]*?\*\//g, " ")
-    // Remove single-line comments
     .replace(/\/\/[^\n]*/g, " ")
-    // Remove double-quoted strings
     .replace(/"(?:\\.|[^"\\])*"/g, '""')
-    // Remove single-quoted strings
     .replace(/'(?:\\.|[^'\\])*'/g, "''")
-    // Remove simple template literal static segments (preserve ${...} expressions)
     .replace(/`(?:\\.|[^`$\\])*`/g, "``");
 }
 
@@ -109,7 +108,9 @@ function stripCommentsAndStrings(code: string): string {
  * Static security check before code is sent to the Web Worker.
  * Rejects forbidden network, DOM, storage, and dynamic code evaluation identifiers.
  */
-export function validateSceneCodeStatic(rawCode: string): StaticValidationResult {
+export function validateSceneCodeStatic(
+  rawCode: string
+): StaticValidationResult {
   const normalizedCode = normalizeSceneCodeBody(rawCode);
 
   if (!normalizedCode || normalizedCode.length < 10) {
@@ -138,17 +139,27 @@ export function validateSceneCodeStatic(rawCode: string): StaticValidationResult
   if (/\bimport\s*\(/.test(stripped)) {
     return {
       valid: false,
-      reason: 'Dynamic "import()" is not allowed in sandboxed Canvas 2D scene code',
+      reason:
+        'Dynamic "import()" is not allowed in sandboxed Canvas 2D scene code',
       forbiddenIdentifier: "import",
       normalizedCode,
     };
   }
 
-  // Verify basic JS syntax without executing it
+  // Verify basic JS syntax with 6th parameter `kit` without executing it
   try {
-    new Function("ctx", "t", "w", "h", "scene", `"use strict";\n${normalizedCode}`);
+    new Function(
+      "ctx",
+      "t",
+      "w",
+      "h",
+      "scene",
+      "kit",
+      `"use strict";\n${normalizedCode}`
+    );
   } catch (err) {
-    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    const msg =
+      err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     return {
       valid: false,
       reason: `SyntaxError in scene code: ${msg}`,
@@ -163,9 +174,9 @@ export function validateSceneCodeStatic(rawCode: string): StaticValidationResult
 }
 
 /**
- * Executes and validates `draw(ctx, t, w, h, scene)` inside an isolated Web Worker + OffscreenCanvas.
- * Enforces a strict 2000ms timeout (`worker.terminate()` on overrun) and performs blank-frame pixel analysis
- * at `t = 0.5` and `t = Math.max(1.0, scene.durationSec * 0.5)`.
+ * Executes and validates `draw(ctx, t, w, h, scene, kit)` inside an isolated Web Worker + OffscreenCanvas
+ * at unified 1920x1080 logical resolution.
+ * Enforces a strict 2000ms timeout (`worker.terminate()` on overrun) and performs blank-frame pixel analysis.
  */
 export async function validateAndRenderInSandbox(
   options: SandboxRunOptions
@@ -182,9 +193,9 @@ export async function validateAndRenderInSandbox(
     };
   }
 
-  const width = options.width ?? 960;
-  const height = options.height ?? 540;
-  const durationSec = Math.max(1.0, options.scene.durationSec || 4.0);
+  const width = options.width ?? DEFAULT_TEST_WIDTH;
+  const height = options.height ?? DEFAULT_TEST_HEIGHT;
+  const durationSec = Math.max(2.0, options.scene.durationSec || 4.0);
   const captureTime = options.captureTime ?? durationSec * 0.5;
   const testTimes = options.testTimes ?? [
     0.5,
@@ -296,14 +307,14 @@ export async function validateAndRenderInSandbox(
 
 /**
  * Renders a single frame at `timeSec` inside the isolated Web Worker + OffscreenCanvas
- * with a strict 2000ms timeout.
+ * at unified 1920x1080 resolution with a strict 2000ms timeout.
  */
 export async function renderFrameInWorker(
   code: string,
   scene: PlannedScene,
   timeSec: number,
-  width = 960,
-  height = 540,
+  width = DEFAULT_TEST_WIDTH,
+  height = DEFAULT_TEST_HEIGHT,
   timeoutMs = SANDBOX_FRAME_TIMEOUT_MS
 ): Promise<SandboxRunResult> {
   return validateAndRenderInSandbox({

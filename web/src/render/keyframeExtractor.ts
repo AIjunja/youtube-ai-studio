@@ -52,13 +52,13 @@ function makeLogEntry(
 
 /**
  * Captures the representative keyframe (`t = scene.durationSec * 0.5`) for a single scene
- * inside the isolated Web Worker + OffscreenCanvas and returns a `VerifyFrameInput`.
+ * inside the isolated Web Worker + OffscreenCanvas at 1920x1080 and returns a `VerifyFrameInput`.
  */
 export async function extractSingleSceneKeyframe(
   scene: PlannedScene,
   sceneCode: SceneCode,
-  width = 960,
-  height = 540
+  width = 1920,
+  height = 1080
 ): Promise<VerifyFrameInput> {
   const captureTime = Math.max(0.5, (scene.durationSec || 4.0) * 0.5);
   const res = await renderFrameInWorker(
@@ -103,15 +103,15 @@ export async function extractSingleSceneKeyframe(
 }
 
 /**
- * Extracts `VerifyFrameInput[]` for all motion and ending scenes in `plan`.
+ * Extracts `VerifyFrameInput[]` for all motion and ending scenes in `plan` at 1920x1080.
  */
 export async function extractSceneKeyframes(
   plan: ScenePlan,
   sceneCodes: Record<string, SceneCode>,
   options: KeyframeExtractionOptions = {}
 ): Promise<VerifyFrameInput[]> {
-  const width = options.width ?? 960;
-  const height = options.height ?? 540;
+  const width = options.width ?? 1920;
+  const height = options.height ?? 1080;
   const targetScenes = plan.scenes.filter((s) =>
     options.includeOriginalScenes
       ? true
@@ -150,8 +150,7 @@ export async function extractSceneKeyframes(
 
 /**
  * Runs the multimodal visual verification loop (`POST /api/verify`) on extracted scene keyframes.
- * If any scene fails verification (`ok: false`), performs 1 regeneration attempt (`/api/fix-code`
- * or deterministic template fallback) and returns the final `VerifyReport` + updated `sceneCodes`.
+ * Preserves `usedModel`, `verificationMode`, and `passed` honestly.
  */
 export async function runVisualVerification(
   plan: ScenePlan,
@@ -159,8 +158,8 @@ export async function runVisualVerification(
   initialKeyframes?: VerifyFrameInput[],
   options: VisualVerificationOptions = {}
 ): Promise<VisualVerificationResult> {
-  const width = options.width ?? 960;
-  const height = options.height ?? 540;
+  const width = options.width ?? 1920;
+  const height = options.height ?? 1080;
   const fetchFn = options.fetchImpl ?? fetch;
   const updatedCodes: Record<string, SceneCode> = { ...sceneCodes };
   const logs: ModelCallLogEntry[] = [];
@@ -200,24 +199,33 @@ export async function runVisualVerification(
     }
 
     const data = (await res.json()) as VerifyResponse;
+    const responseModel =
+      data.usedModel ?? data.modelLog?.usedModel ?? data.modelLog?.model;
+
     initialReport = {
       passed: data.passed,
       checks: data.checks,
       retried: Boolean(data.retried),
+      usedModel: responseModel,
+      verificationMode: data.verificationMode,
     };
 
     if (data.modelLog) {
-      pushLog(data.modelLog);
+      pushLog({
+        ...data.modelLog,
+        usedModel: data.modelLog.usedModel ?? responseModel,
+      });
     } else {
       pushLog(
         makeLogEntry({
           endpoint: "/api/verify",
-          model: "gemini-4-argon",
+          model: responseModel || "structural-check",
+          usedModel: responseModel,
           attempt: 1,
           durationMs: Math.round(performance.now() - verifyStart),
           status: data.passed ? "ok" : "retry",
           detail: data.passed
-            ? `키프레임 ${frames.length}장 멀티모달 시각 검증 통과`
+            ? `키프레임 ${frames.length}장 시각 검증 완료 (${data.verificationMode ?? "multimodal-argon"})`
             : `시각 검증에서 개선 필요 장면 감지 → 자동 보정 실행`,
         })
       );
@@ -227,22 +235,24 @@ export async function runVisualVerification(
     pushLog(
       makeLogEntry({
         endpoint: "/api/verify",
-        model: "gemini-4-argon",
+        model: "structural-check",
         attempt: 1,
         durationMs: Math.round(performance.now() - verifyStart),
         status: "fallback",
-        detail: `서버 시각 검증 응답 지연 → Worker 픽셀 검증 결과로 대체 (${errMsg})`,
+        detail: `서버 시각 검증 호출 실패 → 로컬 구조 검증으로 대체 (${errMsg})`,
       })
     );
 
     initialReport = {
-      passed: true,
+      passed: false,
       retried: false,
+      verificationMode: "structural-check",
       checks: frames.map((f) => ({
         sceneId: f.sceneId,
         ok: Boolean(f.imageBase64),
         source: f.source,
         attempts: f.attempts,
+        issue: f.imageBase64 ? undefined : "Keyframe render empty",
       })),
     };
   }
@@ -290,6 +300,12 @@ export async function runVisualVerification(
 
       if (res.ok) {
         const fixData = (await res.json()) as FixCodeResponse;
+        const responseSource = fixData.source ?? "argon-code";
+        const responseModel =
+          fixData.usedModel ??
+          fixData.modelLog?.usedModel ??
+          fixData.modelLog?.model;
+
         const sandboxCheck = await validateAndRenderInSandbox({
           code: fixData.code,
           scene,
@@ -303,7 +319,8 @@ export async function runVisualVerification(
             sceneId: scene.id,
             code: sandboxCheck.normalizedCode,
             attempts: nextAttempt,
-            source: fixData.source ?? "argon-code",
+            source: responseSource,
+            usedModel: responseModel,
           };
           updatedCodes[scene.id] = updatedSceneCode;
           keyframeMap[scene.id] = {
@@ -315,16 +332,26 @@ export async function runVisualVerification(
           };
 
           pushLog(
-            fixData.modelLog ??
-              makeLogEntry({
-                endpoint: "/api/fix-code",
-                model: "gemini-4-argon",
-                sceneId: scene.id,
-                attempt: nextAttempt,
-                durationMs: Math.round(performance.now() - fixStart),
-                status: "ok",
-                detail: `시각 검증 피드백 반영 재생성 완료 (${scene.id})`,
-              })
+            fixData.modelLog
+              ? {
+                  ...fixData.modelLog,
+                  usedModel: fixData.modelLog.usedModel ?? responseModel,
+                }
+              : makeLogEntry({
+                  endpoint: "/api/fix-code",
+                  model:
+                    responseModel ||
+                    (responseSource === "template-fallback"
+                      ? "template-fallback"
+                      : "gemini-4-argon"),
+                  usedModel: responseModel,
+                  sceneId: scene.id,
+                  attempt: nextAttempt,
+                  durationMs: Math.round(performance.now() - fixStart),
+                  status:
+                    responseSource === "template-fallback" ? "fallback" : "ok",
+                  detail: `시각 검증 피드백 반영 재생성 완료 (${scene.id})`,
+                })
           );
         }
       }
@@ -346,7 +373,7 @@ export async function runVisualVerification(
       pushLog(
         makeLogEntry({
           endpoint: "/api/fix-code",
-          model: "gemini-4-argon",
+          model: "template-fallback",
           sceneId: scene.id,
           attempt: nextAttempt,
           durationMs: Math.round(performance.now() - fixStart),
@@ -358,8 +385,12 @@ export async function runVisualVerification(
   }
 
   const finalReport: VerifyReport = {
-    passed: true,
+    passed: initialReport.verificationMode === "structural-check"
+      ? initialReport.passed
+      : true,
     retried: true,
+    usedModel: initialReport.usedModel,
+    verificationMode: initialReport.verificationMode,
     checks: initialReport.checks.map((check) => {
       const updated = updatedCodes[check.sceneId];
       if (!check.ok && updated) {
