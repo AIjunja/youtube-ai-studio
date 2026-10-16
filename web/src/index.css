@@ -1,22 +1,54 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "GmarketSansBold";
+  src: url("/fonts/GmarketSansTTFBold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "GmarketSansMedium";
+  src: url("/fonts/GmarketSansTTFMedium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "GmarketSansLight";
+  src: url("/fonts/GmarketSansTTFLight.ttf") format("truetype");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --yt-bg: #1f1f1f;
   --yt-surface: #282828;
+  --yt-inner: #181818;
   --yt-border: #3e3e3e;
-  --yt-hover: #3a3a3a;
-  --yt-text-primary: #ffffff;
+  --yt-hover: #323232;
+  --yt-text-primary: #f1f1f1;
   --yt-text-secondary: #aaaaaa;
+  --yt-text-muted: #717171;
   --yt-accent-blue: #3ea6ff;
-  --yt-lime: #c6ff00;
+  --yt-accent-red: #ff4e45;
+  --yt-success: #2ba640;
   font-family: "Roboto", "Noto Sans KR", sans-serif;
 }
 
+html,
 body {
   background-color: #1f1f1f;
-  color: #ffffff;
+  color: #f1f1f1;
   margin: 0;
   padding: 0;
+  font-family: "Roboto", "Noto Sans KR", sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+  overflow-x: hidden;
 }
 
 .material-symbols-outlined {

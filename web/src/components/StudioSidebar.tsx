@@ -5,6 +5,8 @@ interface StudioSidebarProps {
   activeTab: StudioNavTab;
   onSelectTab: (tab: StudioNavTab) => void;
   collapsed: boolean;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
 }
 
 interface NavItem {
@@ -12,7 +14,6 @@ interface NavItem {
   label: string;
   icon: string;
   tab?: StudioNavTab;
-  isAiFeature?: boolean;
 }
 
 const MAIN_NAV_ITEMS: NavItem[] = [
@@ -23,17 +24,16 @@ const MAIN_NAV_ITEMS: NavItem[] = [
     tab: "dashboard",
   },
   {
-    id: "ai-create",
-    label: "✨ AI 제작",
-    icon: "auto_awesome",
-    tab: "ai-create",
-    isAiFeature: true,
-  },
-  {
     id: "content",
     label: "콘텐츠",
     icon: "smart_display",
     tab: "content",
+  },
+  {
+    id: "ai-create",
+    label: "AI 편집",
+    icon: "movie_edit",
+    tab: "ai-create",
   },
   {
     id: "analytics",
@@ -77,45 +77,38 @@ export const StudioSidebar: React.FC<StudioSidebarProps> = ({
   activeTab,
   onSelectTab,
   collapsed,
+  mobileOpen = false,
+  onCloseMobile,
 }) => {
-  return (
-    <aside
-      className={`${
-        collapsed ? "w-[72px]" : "w-[255px]"
-      } shrink-0 bg-[#282828] border-r border-[#3e3e3e] flex flex-col justify-between transition-[width] duration-200 select-none min-h-[calc(100vh-64px)]`}
-    >
-      {/* Top Channel Profile + Main Menu */}
+  const renderNavContent = (isIconOnly: boolean, isMobileDrawer: boolean) => (
+    <>
       <div className="flex flex-col">
         {/* Channel Avatar Block */}
         <div
           className={`flex flex-col items-center ${
-            collapsed ? "py-4 px-2" : "pt-6 pb-4 px-4"
+            isIconOnly ? "py-4 px-2" : "pt-6 pb-4 px-4"
           }`}
         >
           <button
             type="button"
-            onClick={() => onSelectTab("dashboard")}
-            className="relative group cursor-pointer"
+            onClick={() => {
+              onSelectTab("dashboard");
+              onCloseMobile?.();
+            }}
+            className="relative cursor-pointer"
           >
             <img
               src="/studio/channels4_profile.jpg"
               alt="AI쭌 채널 프로필"
               className={`${
-                collapsed ? "w-9 h-9" : "w-[112px] h-[112px]"
-              } rounded-full object-cover border-2 border-[#3e3e3e] group-hover:border-[#3ea6ff] transition-all`}
+                isIconOnly ? "w-9 h-9" : "w-[112px] h-[112px]"
+              } rounded-full object-cover border border-[#3e3e3e]`}
             />
-            {!collapsed && (
-              <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                <span className="material-symbols-outlined text-white text-[24px]">
-                  open_in_new
-                </span>
-              </div>
-            )}
           </button>
 
-          {!collapsed && (
+          {!isIconOnly && (
             <div className="mt-3 text-center w-full overflow-hidden">
-              <div className="text-[15px] font-medium text-white leading-snug">
+              <div className="text-[14px] font-medium text-[#f1f1f1] leading-snug">
                 내 채널
               </div>
               <div
@@ -129,50 +122,9 @@ export const StudioSidebar: React.FC<StudioSidebarProps> = ({
         </div>
 
         {/* Navigation Links */}
-        <nav className="px-2 space-y-0.5">
+        <nav className="space-y-0.5">
           {MAIN_NAV_ITEMS.map((item) => {
             const isActive = item.tab ? activeTab === item.tab : false;
-
-            if (item.isAiFeature) {
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onSelectTab("ai-create")}
-                  title="✨ AI 제작 (NEW)"
-                  className={`w-full flex items-center ${
-                    collapsed ? "justify-center px-0 py-3" : "justify-between px-4 py-2.5"
-                  } rounded-lg transition-all cursor-pointer relative overflow-hidden group ${
-                    isActive
-                      ? "bg-gradient-to-r from-[#7c4dff]/25 to-[#3ea6ff]/20 text-white border border-[#7c4dff]/60 shadow-sm shadow-[#7c4dff]/20"
-                      : "bg-gradient-to-r from-[#7c4dff]/10 to-[#3ea6ff]/10 hover:from-[#7c4dff]/20 hover:to-[#3ea6ff]/20 text-white border border-[#7c4dff]/30"
-                  }`}
-                >
-                  {isActive && (
-                    <span className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r bg-gradient-to-b from-[#7c4dff] to-[#3ea6ff]" />
-                  )}
-                  <div
-                    className={`flex items-center ${
-                      collapsed ? "justify-center" : "gap-4"
-                    }`}
-                  >
-                    <span className="material-symbols-outlined text-[22px] text-[#3ea6ff] group-hover:scale-110 transition-transform">
-                      {item.icon}
-                    </span>
-                    {!collapsed && (
-                      <span className="text-[14px] font-semibold tracking-tight bg-gradient-to-r from-white via-[#e2d6ff] to-[#3ea6ff] bg-clip-text text-transparent">
-                        {item.label}
-                      </span>
-                    )}
-                  </div>
-                  {!collapsed && (
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gradient-to-r from-[#7c4dff] to-[#3ea6ff] text-white tracking-wider shadow-sm">
-                      NEW
-                    </span>
-                  )}
-                </button>
-              );
-            }
 
             return (
               <button
@@ -181,68 +133,68 @@ export const StudioSidebar: React.FC<StudioSidebarProps> = ({
                 onClick={() => {
                   if (item.tab === "dashboard") {
                     onSelectTab("dashboard");
-                  } else if (item.tab === "content") {
+                  } else if (item.tab === "ai-create" || item.tab === "content") {
                     onSelectTab("ai-create");
                   } else {
                     onSelectTab("dashboard");
                   }
+                  if (isMobileDrawer) {
+                    onCloseMobile?.();
+                  }
                 }}
                 title={item.label}
                 className={`w-full flex items-center ${
-                  collapsed ? "justify-center px-0 py-3" : "gap-5 px-4 py-2.5"
-                } rounded-lg text-[14px] transition-colors cursor-pointer relative ${
+                  isIconOnly ? "justify-center px-0 py-3" : "gap-5 px-5 py-2.5"
+                } text-[14px] transition-colors cursor-pointer relative ${
                   isActive
-                    ? "bg-[#1f1f1f] text-white font-medium"
-                    : "text-[#aaaaaa] hover:bg-[#3a3a3a] hover:text-white font-normal"
+                    ? "bg-[#1f1f1f] text-[#f1f1f1] font-medium border-l-[3px] border-[#ff4e45]"
+                    : "text-[#aaaaaa] hover:bg-[#323232] hover:text-[#f1f1f1] font-normal border-l-[3px] border-transparent"
                 }`}
               >
-                {isActive && (
-                  <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r bg-white" />
-                )}
                 <span
                   className={`material-symbols-outlined text-[22px] ${
-                    isActive ? "text-white" : "text-[#aaaaaa]"
+                    isActive ? "text-[#ff4e45]" : "text-[#aaaaaa]"
                   }`}
                 >
                   {item.icon}
                 </span>
-                {!collapsed && <span className="truncate">{item.label}</span>}
+                {!isIconOnly && <span className="truncate">{item.label}</span>}
               </button>
             );
           })}
         </nav>
       </div>
 
-      {/* Bottom Pinned Items: Settings & Send Feedback */}
-      <div className="px-2 py-3 border-t border-[#3e3e3e] space-y-0.5">
+      {/* Bottom Pinned Items */}
+      <div className="py-3 border-t border-[#3e3e3e] space-y-0.5">
         <button
           type="button"
           className={`w-full flex items-center ${
-            collapsed ? "justify-center px-0 py-2.5" : "gap-5 px-4 py-2.5"
-          } rounded-lg text-[14px] text-[#aaaaaa] hover:bg-[#3a3a3a] hover:text-white transition-colors cursor-pointer`}
+            isIconOnly ? "justify-center px-0 py-2.5" : "gap-5 px-5 py-2.5"
+          } text-[14px] text-[#aaaaaa] hover:bg-[#323232] hover:text-[#f1f1f1] transition-colors cursor-pointer`}
           title="설정"
         >
           <span className="material-symbols-outlined text-[22px]">
             settings
           </span>
-          {!collapsed && <span>설정</span>}
+          {!isIconOnly && <span>설정</span>}
         </button>
 
         <button
           type="button"
           className={`w-full flex items-center ${
-            collapsed ? "justify-center px-0 py-2.5" : "gap-5 px-4 py-2.5"
-          } rounded-lg text-[14px] text-[#aaaaaa] hover:bg-[#3a3a3a] hover:text-white transition-colors cursor-pointer`}
+            isIconOnly ? "justify-center px-0 py-2.5" : "gap-5 px-5 py-2.5"
+          } text-[14px] text-[#aaaaaa] hover:bg-[#323232] hover:text-[#f1f1f1] transition-colors cursor-pointer`}
           title="의견 보내기"
         >
           <span className="material-symbols-outlined text-[22px]">
             sms_failed
           </span>
-          {!collapsed && <span>의견 보내기</span>}
+          {!isIconOnly && <span>의견 보내기</span>}
         </button>
 
-        {!collapsed && (
-          <div className="px-4 pt-2 pb-1 text-[11px] text-[#717171] flex flex-wrap gap-x-2 gap-y-1">
+        {!isIconOnly && (
+          <div className="px-5 pt-2 pb-1 text-[11px] text-[#717171] flex flex-wrap gap-x-2 gap-y-1">
             <span>이용약관</span>
             <span>·</span>
             <span>개인정보처리방침</span>
@@ -251,6 +203,37 @@ export const StudioSidebar: React.FC<StudioSidebarProps> = ({
           </div>
         )}
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Desktop (>1024px): full width unless collapsed */}
+      <aside
+        className={`hidden lg:flex ${
+          collapsed ? "w-[72px]" : "w-[240px]"
+        } shrink-0 bg-[#282828] border-r border-[#3e3e3e] flex-col justify-between select-none min-h-[calc(100vh-64px)]`}
+      >
+        {renderNavContent(collapsed, false)}
+      </aside>
+
+      {/* Tablet (601px~1024px): always collapsed 72px icon bar */}
+      <aside className="hidden sm:flex lg:hidden w-[72px] shrink-0 bg-[#282828] border-r border-[#3e3e3e] flex-col justify-between select-none min-h-[calc(100vh-64px)]">
+        {renderNavContent(true, false)}
+      </aside>
+
+      {/* Mobile (<=600px): Drawer overlay when mobileOpen is true */}
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 flex sm:hidden">
+          <div
+            className="fixed inset-0 bg-black/60"
+            onClick={onCloseMobile}
+          />
+          <aside className="relative z-10 w-[240px] max-w-[80vw] bg-[#282828] border-r border-[#3e3e3e] flex flex-col justify-between select-none h-full overflow-y-auto">
+            {renderNavContent(false, true)}
+          </aside>
+        </div>
+      )}
+    </>
   );
 };
