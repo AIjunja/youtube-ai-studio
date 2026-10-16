@@ -452,13 +452,15 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
     const t0 = performance.now();
 
     try {
-      const referenceAudioBase64 = await fileToBase64(voiceAudioFile);
+      const base64 = await fileToBase64(voiceAudioFile);
       const res = await fetch(API_ENDPOINTS.VOICE_CLONE, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          referenceAudioBase64,
+          audioBase64: base64,
+          referenceAudioBase64: base64,
           mimeType: voiceAudioFile.type || "audio/webm",
+          consent: true,
           consentConfirmed: true,
           label: "내 목소리",
         }),
@@ -1554,18 +1556,31 @@ export const AiCreateView: React.FC<AiCreateViewProps> = ({
             <button
               type="button"
               onClick={handleUseDefaultKoreVoice}
-              className="px-3.5 py-2 rounded-[4px] hover:bg-[#323232] text-[14px] text-[#aaaaaa] hover:text-[#f1f1f1] cursor-pointer"
+              className="px-4 py-2 rounded-[4px] hover:bg-[#323232] border border-[#3e3e3e] text-[14px] text-[#f1f1f1] cursor-pointer"
             >
-              기본 음성(Kore) 사용
+              기본 음성(Kore)으로 바로 진행
             </button>
 
             <button
               type="button"
-              disabled={!voiceAudioFile || !voiceConsentChecked || voiceCloning}
-              onClick={handleRegisterVoiceClone}
+              disabled={voiceCloning}
+              onClick={() => {
+                if (voiceAudioFile && voiceConsentChecked) {
+                  handleRegisterVoiceClone();
+                } else if (!voiceConsentChecked) {
+                  setVoiceError("본인 목소리 사용 동의 체크박스를 선택해 주세요.");
+                } else if (!voiceAudioFile) {
+                  // If audio is not yet uploaded/recorded, proceed with Kore default voice gracefully
+                  handleUseDefaultKoreVoice();
+                }
+              }}
               className="px-5 py-2 rounded-[4px] bg-[#3ea6ff] hover:bg-[#65b8ff] text-[#0f0f0f] text-[14px] font-medium cursor-pointer disabled:opacity-40"
             >
-              {voiceCloning ? "목소리 등록 중..." : "목소리 등록하기"}
+              {voiceCloning
+                ? "목소리 등록 중..."
+                : voiceAudioFile
+                ? "목소리 등록하고 다음"
+                : "다음 단계로"}
             </button>
           </div>
         </div>

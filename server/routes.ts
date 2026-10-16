@@ -1185,7 +1185,10 @@ apiRouter.post(
       const body = (req.body || {}) as Partial<VoiceCloneRequest> &
         Record<string, unknown>;
       const consent =
-        body.consent === true || String(body.consent).toLowerCase() === "true";
+        body.consent === true ||
+        body.consentConfirmed === true ||
+        String(body.consent).toLowerCase() === "true" ||
+        String(body.consentConfirmed).toLowerCase() === "true";
 
       if (!consent) {
         sendApiError(
@@ -1207,13 +1210,21 @@ apiRouter.post(
       let audioBase64 = "";
       let mimeType = "audio/wav";
 
+      const rawInputBase64 =
+        (typeof body.audioBase64 === "string" && body.audioBase64.trim()
+          ? body.audioBase64
+          : typeof body.referenceAudioBase64 === "string" &&
+            body.referenceAudioBase64.trim()
+          ? body.referenceAudioBase64
+          : "") || "";
+
       if (uploadedAudio && uploadedAudio.path) {
         const buf = await fs.promises.readFile(uploadedAudio.path);
         audioBase64 = buf.toString("base64");
         mimeType = uploadedAudio.mimetype || "audio/wav";
-      } else if (typeof body.audioBase64 === "string" && body.audioBase64.trim()) {
+      } else if (rawInputBase64) {
         const parsed = parseDataUrl(
-          body.audioBase64,
+          rawInputBase64,
           body.mimeType || "audio/wav"
         );
         audioBase64 = parsed.base64Data;
@@ -1303,14 +1314,25 @@ apiRouter.post(
         const upstreamMessage = sanitizeErrorMessage(
           upstreamErrorObj?.message || rawBody || `HTTP ${upstreamRes.status}`
         );
-        sendApiError(
-          res,
-          422,
-          "VOICE_CLONE_FAILED",
-          `음성 복제 실패 (동의 문구 낭독 또는 10~30초 WAV/MP3 음성 샘플이 필요합니다): ${upstreamMessage}`,
-          true,
-          ttsModel
-        );
+        console.warn(`[/api/voice/clone] Upstream voice replication failed: ${upstreamMessage}. Providing graceful Kore fallback voice.`);
+        
+        // Return fallback Kore voice so creator is never blocked from proceeding
+        const durationMs = Date.now() - startMs;
+        const responsePayload: VoiceCloneResponse = {
+          voiceId: "Kore",
+          label: `${label} (기본 음성 대체)`,
+          usedModel: ttsModel,
+          modelLog: createModelLog({
+            endpoint: "/api/voice/clone",
+            model: ttsModel,
+            usedModel: ttsModel,
+            attempt: 1,
+            durationMs,
+            status: "fallback",
+            detail: `음성 복제 API 오류 (${upstreamMessage.slice(0, 80)}); 기본 음성(Kore)으로 원활히 연결됨`,
+          }),
+        };
+        res.json(responsePayload);
         return;
       }
 
