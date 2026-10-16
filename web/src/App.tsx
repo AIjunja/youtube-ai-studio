@@ -11,19 +11,16 @@ export default function App() {
     window.location.hash === "#ai-create" ? "ai-create" : "dashboard"
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
-  const [autoTriggerDemo, setAutoTriggerDemo] = useState<boolean>(false);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState<boolean>(false);
+  const [initialFlow, setInitialFlow] = useState<
+    "upload" | "scratch" | "sample" | null
+  >(null);
 
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
       .then((data: HealthResponse) => setHealth(data))
-      .catch(() =>
-        setHealth({
-          ok: true,
-          model: "gemini-4-argon",
-          renderer: "browser-canvas-worker",
-        })
-      );
+      .catch(() => setHealth(null));
   }, []);
 
   const handleSelectTab = (tab: StudioNavTab) => {
@@ -31,19 +28,28 @@ export default function App() {
     window.location.hash = tab === "ai-create" ? "#ai-create" : "#dashboard";
   };
 
-  const handleStartAiCreate = (autoRunDemo = false) => {
-    if (autoRunDemo) {
-      setAutoTriggerDemo(true);
-    }
+  const handleStartAiCreate = (
+    flow: "upload" | "scratch" | "sample" = "upload"
+  ) => {
+    setInitialFlow(flow);
     handleSelectTab("ai-create");
   };
 
+  const handleToggleSidebar = () => {
+    if (window.innerWidth <= 600) {
+      setMobileDrawerOpen((prev) => !prev);
+    } else {
+      setSidebarCollapsed((prev) => !prev);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#1f1f1f] text-white flex flex-col font-sans">
+    <div className="min-h-screen bg-[#1f1f1f] text-[#f1f1f1] flex flex-col font-sans overflow-x-hidden">
       <StudioHeader
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
-        onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+        onToggleSidebar={handleToggleSidebar}
+        onStartAiFlow={handleStartAiCreate}
         health={health}
       />
 
@@ -52,6 +58,8 @@ export default function App() {
           activeTab={activeTab}
           onSelectTab={handleSelectTab}
           collapsed={sidebarCollapsed}
+          mobileOpen={mobileDrawerOpen}
+          onCloseMobile={() => setMobileDrawerOpen(false)}
         />
 
         <main className="flex-1 min-w-0 flex flex-col bg-[#1f1f1f]">
@@ -59,8 +67,8 @@ export default function App() {
             <DashboardView onStartAiCreate={handleStartAiCreate} />
           ) : (
             <AiCreateView
-              autoTriggerDemo={autoTriggerDemo}
-              onConsumeAutoTrigger={() => setAutoTriggerDemo(false)}
+              initialFlow={initialFlow}
+              onConsumeInitialFlow={() => setInitialFlow(null)}
             />
           )}
         </main>

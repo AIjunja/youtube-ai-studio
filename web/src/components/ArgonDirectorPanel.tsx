@@ -8,6 +8,8 @@ import type {
   VerifyReport,
 } from "../../../shared/contract";
 
+export type ReviewTabId = "subtitles" | "cuts" | "ai-scenes" | "logs";
+
 interface ArgonDirectorPanelProps {
   plan: ScenePlan;
   sceneCodes: Record<string, SceneCode>;
@@ -15,35 +17,35 @@ interface ArgonDirectorPanelProps {
   modelLogs: ModelCallLogEntry[];
   selectedSceneId: string;
   onSelectScene: (sceneId: string) => void;
-  lowConfCutEnabledMap: Record<number, boolean>;
-  onToggleLowConfCut: (index: number) => void;
+  activeCutMap: Record<number, boolean>;
+  onToggleCut: (index: number) => void;
+  onPreviewCutInRaw: (startSec: number) => void;
+  onUpdateTranscriptText: (index: number, newText: string) => void;
+  onUpdateSceneText: (
+    sceneId: string,
+    updates: { caption?: string; script?: string }
+  ) => void;
+  onSynthesizeSceneTts: (scene: PlannedScene, autoPlay?: boolean) => Promise<void>;
+  ttsLoadingSceneId: string | null;
   onReviseScene: (scene: PlannedScene, instruction: string) => Promise<void>;
   onRunVerify: () => Promise<void>;
   revisingSceneId: string | null;
   verifying: boolean;
 }
 
-const CUT_REASON_META: Record<
-  CutReason,
-  { label: string; colorClass: string }
-> = {
-  ng: {
-    label: "NG 테이크",
-    colorClass: "bg-[#f04438]/20 text-[#fda29b] border-[#f04438]/50",
-  },
-  silence: {
-    label: "침묵/무음",
-    colorClass: "bg-[#3ea6ff]/20 text-[#84caff] border-[#3ea6ff]/50",
-  },
-  repeat: {
-    label: "반복/말꼬리",
-    colorClass: "bg-[#f59e0b]/20 text-[#fde68a] border-[#f59e0b]/50",
-  },
-  offtopic: {
-    label: "주제 이탈",
-    colorClass: "bg-[#a855f7]/20 text-[#d8b4fe] border-[#a855f7]/50",
-  },
+const CUT_REASON_LABEL: Record<CutReason, string> = {
+  ng: "NG",
+  silence: "침묵",
+  repeat: "반복",
+  offtopic: "주제 이탈",
 };
+
+function formatTimeSec(sec: number): string {
+  const safe = Math.max(0, sec);
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${String(m).padStart(2, "0")}:${s.toFixed(1).padStart(4, "0")}`;
+}
 
 export const ArgonDirectorPanel: React.FC<ArgonDirectorPanelProps> = ({
   plan,
@@ -52,412 +54,409 @@ export const ArgonDirectorPanel: React.FC<ArgonDirectorPanelProps> = ({
   modelLogs,
   selectedSceneId,
   onSelectScene,
-  lowConfCutEnabledMap,
-  onToggleLowConfCut,
+  activeCutMap,
+  onToggleCut,
+  onPreviewCutInRaw,
+  onUpdateTranscriptText,
+  onUpdateSceneText,
+  onSynthesizeSceneTts,
+  ttsLoadingSceneId,
   onReviseScene,
   onRunVerify,
   revisingSceneId,
   verifying,
 }) => {
-  const [openCodeSceneId, setOpenCodeSceneId] = useState<string | null>(
-    "scene-2-motion-compare"
-  );
-  const [reviseInputs, setReviseInputs] = useState<Record<string, string>>({
-    "scene-2-motion-compare":
-      "글자를 더 크게 하고 핵심 키워드를 라임색(#C6FF00)으로 강조해줘",
-    "scene-4-motion-diagram":
-      "3단계 박스 테두리를 더 굵게 하고 통과 배지를 강조해줘",
-  });
+  const [activeTab, setActiveTab] = useState<ReviewTabId>("subtitles");
+  const [openCodeSceneId, setOpenCodeSceneId] = useState<string | null>(null);
+  const [reviseInputs, setReviseInputs] = useState<Record<string, string>>({});
+  const [playingSceneId, setPlayingSceneId] = useState<string | null>(null);
 
-  const handleReviseSubmit = async (scene: PlannedScene) => {
-    const text =
-      (reviseInputs[scene.id] || "").trim() ||
-      "글자를 더 크게 하고 핵심 키워드를 라임색으로 강조해줘";
-    await onReviseScene(scene, text);
+  const aiScenes = plan.scenes.filter(
+    (s) => s.kind === "motion" || s.kind === "ending"
+  );
+
+  const handlePlaySceneAudio = async (scene: PlannedScene) => {
+    const src =
+      scene.audioUrl ||
+      (scene.audioBase64
+        ? scene.audioBase64.startsWith("data:")
+          ? scene.audioBase64
+          : `data:audio/wav;base64,${scene.audioBase64}`
+        : "");
+
+    if (src) {
+      setPlayingSceneId(scene.id);
+      const audio = new Audio(src);
+      audio.onended = () => setPlayingSceneId(null);
+      audio.onerror = () => setPlayingSceneId(null);
+      await audio.play().catch(() => setPlayingSceneId(null));
+    } else {
+      await onSynthesizeSceneTts(scene, true);
+    }
   };
 
   return (
-    <aside className="w-full xl:w-[470px] shrink-0 bg-[#282828] border border-[#3e3e3e] rounded-xl flex flex-col overflow-hidden">
-      {/* Director Header */}
-      <div className="p-4 bg-gradient-to-r from-[#231f32] via-[#262836] to-[#282828] border-b border-[#3e3e3e] flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#7c4dff] to-[#3ea6ff] flex items-center justify-center text-white shadow">
-            <span className="material-symbols-outlined text-[20px]">
-              psychology
-            </span>
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-[16px] font-black text-white tracking-tight">
-                Argon Director 감독 패널
-              </h2>
-              <span className="px-2 py-0.5 rounded bg-[#c6ff00] text-[#111111] text-[10px] font-black">
-                LIVE EVIDENCE
-              </span>
-            </div>
-            <p className="text-[11px] text-[#aaaaaa]">
-              멀티모달 계획 · Canvas 2D 코드 생성 · 샌드박스/시각 검증 루프
-            </p>
-          </div>
-        </div>
-
+    <div className="w-full bg-[#282828] border border-[#3e3e3e] rounded-[8px] flex flex-col overflow-hidden">
+      {/* Top 4 Review Tabs */}
+      <div className="flex border-b border-[#3e3e3e] bg-[#282828] overflow-x-auto">
         <button
           type="button"
-          onClick={onRunVerify}
-          disabled={verifying}
-          title="렌더된 키프레임을 Argon 멀티모달로 다시 검증합니다 (/api/verify)"
-          className="px-3 py-1.5 rounded-lg bg-[#1f1f1f] hover:bg-[#3a3a3a] border border-[#3e3e3e] text-[11px] font-bold text-[#c6ff00] flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+          onClick={() => setActiveTab("subtitles")}
+          className={`px-4 py-3 text-[14px] font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
+            activeTab === "subtitles"
+              ? "border-[#3ea6ff] text-[#f1f1f1]"
+              : "border-transparent text-[#aaaaaa] hover:text-[#f1f1f1]"
+          }`}
         >
-          <span className="material-symbols-outlined text-[15px]">
-            verified
-          </span>
-          <span>{verifying ? "검증 중..." : "시각 재검증"}</span>
+          자막
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("cuts")}
+          className={`px-4 py-3 text-[14px] font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
+            activeTab === "cuts"
+              ? "border-[#3ea6ff] text-[#f1f1f1]"
+              : "border-transparent text-[#aaaaaa] hover:text-[#f1f1f1]"
+          }`}
+        >
+          잘린 부분 ({plan.cuts.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("ai-scenes")}
+          className={`px-4 py-3 text-[14px] font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
+            activeTab === "ai-scenes"
+              ? "border-[#3ea6ff] text-[#f1f1f1]"
+              : "border-transparent text-[#aaaaaa] hover:text-[#f1f1f1]"
+          }`}
+        >
+          AI 장면 ({aiScenes.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("logs")}
+          className={`px-4 py-3 text-[14px] font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
+            activeTab === "logs"
+              ? "border-[#3ea6ff] text-[#f1f1f1]"
+              : "border-transparent text-[#aaaaaa] hover:text-[#f1f1f1]"
+          }`}
+        >
+          AI 작업 기록
         </button>
       </div>
 
-      {/* Scrollable Director Content (5 Core Sections) */}
-      <div className="p-4 space-y-5 max-h-[1250px] overflow-y-auto">
-        {/* ============================================================
-            ① 영상 요약 & 불확실 사실 (uncertainFacts)
-           ============================================================ */}
-        <section className="space-y-2.5">
-          <div className="flex items-center justify-between">
-            <h3 className="text-[13px] font-bold text-white flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-[#3ea6ff]/20 text-[#3ea6ff] text-[11px] font-mono">
-                ①
-              </span>
-              <span>영상 요약 &amp; 불확실 사실 공개</span>
-            </h3>
-            <span className="px-2 py-0.5 rounded bg-[#1f1f1f] border border-[#3e3e3e] text-[11px] font-mono text-[#aaaaaa]">
-              lang: {plan.language.toUpperCase()}
-            </span>
-          </div>
-
-          <div className="p-3 rounded-lg bg-[#1f1f1f] border border-[#3e3e3e] text-[12.5px] text-[#dddddd] leading-relaxed">
-            {plan.summary}
-          </div>
-
-          {/* Amber Caution Box for uncertainFacts */}
-          {plan.uncertainFacts && plan.uncertainFacts.length > 0 && (
-            <div className="p-3 rounded-lg bg-[#f59e0b]/15 border border-[#f59e0b]/50 space-y-1">
-              <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#fbbf24]">
-                <span className="material-symbols-outlined text-[16px]">
-                  warning
-                </span>
-                <span>
-                  불확실한 사실 투명 표시 (uncertainFacts · 추측성 단정 방지)
-                </span>
-              </div>
-              {plan.uncertainFacts.map((fact, i) => (
-                <p
-                  key={i}
-                  className="text-[12px] text-[#fde68a] leading-snug pl-5"
-                >
-                  • {fact}
-                </p>
-              ))}
+      {/* Tab Content */}
+      <div className="p-4 space-y-4 max-h-[720px] overflow-y-auto">
+        {/* ==================== TAB 1: 자막 ==================== */}
+        {activeTab === "subtitles" && (
+          <div className="space-y-4">
+            <div className="text-[12px] text-[#aaaaaa]">
+              자막을 클릭해 바로 수정하면 오른쪽 미리보기와 내보내기 영상에 즉시 반영됩니다.
             </div>
-          )}
-        </section>
 
-        {/* ============================================================
-            ② 자동 컷 편집 (cuts) — confidence >= 0.7 vs < 0.7 제안 분리
-           ============================================================ */}
-        <section className="space-y-2.5 pt-2 border-t border-[#3e3e3e]">
-          <div className="flex items-center justify-between">
-            <h3 className="text-[13px] font-bold text-white flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-[#3ea6ff]/20 text-[#3ea6ff] text-[11px] font-mono">
-                ②
-              </span>
-              <span>자동 컷 편집 ({plan.cuts.length}구간)</span>
-            </h3>
-            <span className="text-[11px] text-[#aaaaaa]">
-              신뢰도 &lt; 70%는 제안만 표시
-            </span>
-          </div>
-
-          <div className="space-y-2">
-            {plan.cuts.map((cut, idx) => {
-              const isHighConf = cut.confidence >= 0.7;
-              const pct = Math.round(cut.confidence * 100);
-              const meta = CUT_REASON_META[cut.reason] || CUT_REASON_META.ng;
-              const isSuggestionApplied = !!lowConfCutEnabledMap[idx];
-
-              return (
-                <div
-                  key={idx}
-                  className={`p-3 rounded-lg border transition-colors ${
-                    isHighConf
-                      ? "bg-[#1f1f1f] border-[#3e3e3e]"
-                      : "bg-[#f59e0b]/10 border-[#f59e0b]/50"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[12px] font-bold text-white">
-                        {cut.start.toFixed(1)}s ~ {cut.end.toFixed(1)}s
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded border text-[10px] font-bold ${meta.colorClass}`}
-                      >
-                        {cut.reason.toUpperCase()} · {meta.label}
-                      </span>
-                      <span className="text-[11px] font-mono text-[#cccccc]">
-                        신뢰도{" "}
-                        <strong
-                          className={
-                            isHighConf ? "text-[#6ee7b7]" : "text-[#fbbf24]"
-                          }
-                        >
-                          {pct}%
-                        </strong>
-                      </span>
-                    </div>
-
-                    {isHighConf ? (
-                      <span className="px-2 py-0.5 rounded bg-[#f04438]/25 border border-[#f04438]/50 text-[10px] font-bold text-[#fda29b]">
-                        자동 컷 ON
-                      </span>
-                    ) : (
-                      <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
-                        <span className="px-2 py-0.5 rounded bg-[#f59e0b]/25 border border-[#f59e0b] text-[10px] font-bold text-[#fde68a]">
-                          제안 (사용자 확인)
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={isSuggestionApplied}
-                          onChange={() => onToggleLowConfCut(idx)}
-                          className="accent-[#f59e0b] w-4 h-4 cursor-pointer"
-                        />
-                      </label>
-                    )}
-                  </div>
-
-                  {cut.note && (
-                    <p className="text-[11.5px] text-[#aaaaaa] mt-1.5">
-                      {cut.note}
-                    </p>
-                  )}
+            {plan.transcript.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-[12px] font-medium text-[#aaaaaa]">
+                  원본 음성 자막
                 </div>
-              );
-            })}
-          </div>
-        </section>
-
-        {/* ============================================================
-            ③ 빠진 설명 발견 (gaps) — WOW 포인트 강조
-           ============================================================ */}
-        <section className="space-y-2.5 pt-2 border-t border-[#3e3e3e]">
-          <div className="rounded-xl p-3.5 bg-gradient-to-r from-[#7c4dff]/25 via-[#3ea6ff]/15 to-[#c6ff00]/20 border border-[#c6ff00]/60 space-y-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
-                <span className="px-1.5 py-0.5 rounded bg-[#c6ff00] text-[#111111] text-[11px] font-black">
-                  ③ WOW POINT
-                </span>
-                <h3 className="text-[13.5px] font-black text-white">
-                  ✨ &ldquo;찍지 않은 설명 장면이 생겼다&rdquo;
-                </h3>
+                {plan.transcript.map((item, idx) => (
+                  <div
+                    key={`tr-${idx}`}
+                    className="p-3 rounded-[4px] bg-[#181818] border border-[#3e3e3e] flex items-start gap-3"
+                  >
+                    <span className="text-[12px] font-mono text-[#aaaaaa] pt-1.5 shrink-0">
+                      {formatTimeSec(item.start)}
+                    </span>
+                    <input
+                      type="text"
+                      value={item.text}
+                      onChange={(e) =>
+                        onUpdateTranscriptText(idx, e.target.value)
+                      }
+                      aria-label={`자막 ${idx + 1}`}
+                      className="flex-1 bg-[#282828] border border-[#3e3e3e] focus:border-[#3ea6ff] rounded-[4px] px-2.5 py-1.5 text-[14px] text-[#f1f1f1] focus:outline-none"
+                    />
+                  </div>
+                ))}
               </div>
-              <span className="text-[11px] font-bold text-[#c6ff00]">
-                {plan.gaps.length}곳 탐지됨
-              </span>
-            </div>
-
-            <p className="text-[11.5px] text-[#dddddd]">
-              단순 컷 편집을 넘어, 시청자가 이해하기 위해 꼭 필요하지만 촬영본에
-              빠져 있는 설명 공백(Gap)을 Argon이 찾아 모션그래픽 장면으로 직접
-              생성했습니다.
-            </p>
+            )}
 
             <div className="space-y-2">
-              {plan.gaps.map((gap, idx) => (
-                <div
-                  key={idx}
-                  className="p-2.5 rounded-lg bg-[#141414]/90 border border-[#c6ff00]/40 flex items-start gap-2.5"
-                >
-                  <span className="px-2 py-0.5 rounded bg-[#c6ff00] text-[#111111] font-mono text-[11px] font-black shrink-0 mt-0.5">
-                    @{gap.atSec.toFixed(1)}s
-                  </span>
-                  <p className="text-[12px] text-white leading-snug">
-                    {gap.missing}
-                  </p>
-                </div>
-              ))}
+              <div className="text-[12px] font-medium text-[#aaaaaa]">
+                완성 영상 장면별 자막 ({plan.scenes.length}개)
+              </div>
+              {plan.scenes.map((scene, idx) => {
+                const isSelected = scene.id === selectedSceneId;
+                return (
+                  <div
+                    key={scene.id}
+                    onClick={() => onSelectScene(scene.id)}
+                    className={`p-3 rounded-[4px] border transition-colors cursor-pointer space-y-2 ${
+                      isSelected
+                        ? "bg-[#1f1f1f] border-[#3ea6ff] border-l-[3px]"
+                        : "bg-[#181818] border-[#3e3e3e] hover:bg-[#323232]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-[12px] text-[#aaaaaa]">
+                      <span>
+                        #{idx + 1}{" "}
+                        {scene.kind === "motion"
+                          ? "AI 설명 장면"
+                          : scene.kind === "ending"
+                            ? "마무리 장면"
+                            : "원본 구간"}
+                      </span>
+                      <span className="font-mono">
+                        {scene.durationSec.toFixed(1)}초
+                      </span>
+                    </div>
+                    <input
+                      type="text"
+                      value={scene.script}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) =>
+                        onUpdateSceneText(scene.id, { script: e.target.value })
+                      }
+                      placeholder="화면에 표시할 자막을 입력하세요"
+                      className="w-full bg-[#282828] border border-[#3e3e3e] focus:border-[#3ea6ff] rounded-[4px] px-2.5 py-1.5 text-[14px] text-[#f1f1f1] focus:outline-none"
+                    />
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </section>
+        )}
 
-        {/* ============================================================
-            ④ 장면 카드 목록 (scenes) & 3대 검증 루프 배지 + 코드 보기 + Revise
-           ============================================================ */}
-        <section className="space-y-3 pt-2 border-t border-[#3e3e3e]">
-          <div className="flex items-center justify-between">
-            <h3 className="text-[13px] font-bold text-white flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-[#3ea6ff]/20 text-[#3ea6ff] text-[11px] font-mono">
-                ④
-              </span>
-              <span>장면 카드 목록 &amp; 3대 검증 배지 ({plan.scenes.length}개)</span>
-            </h3>
-            <span className="text-[11px] text-[#c6ff00] font-semibold">
-              Verify Report: {verifyReport.passed ? "PASSED ✓" : "RETRY"}
-            </span>
-          </div>
-
+        {/* ==================== TAB 2: 잘린 부분 ==================== */}
+        {activeTab === "cuts" && (
           <div className="space-y-3">
-            {plan.scenes.map((scene, idx) => {
-              const isSelected = scene.id === selectedSceneId;
-              const isMotionOrEnding =
-                scene.kind === "motion" || scene.kind === "ending";
-              const codeObj = sceneCodes[scene.id];
-              const verifyCheck = verifyReport.checks.find(
-                (c) => c.sceneId === scene.id
-              );
-              const isCodeOpen = openCodeSceneId === scene.id;
-              const isRevisingThis = revisingSceneId === scene.id;
+            {plan.cuts.length === 0 ? (
+              <div className="p-6 rounded-[4px] bg-[#181818] border border-[#3e3e3e] text-center text-[14px] text-[#aaaaaa]">
+                원본 영상에서 잘린 구간이 없습니다.
+              </div>
+            ) : (
+              <>
+                <div className="text-[12px] text-[#aaaaaa]">
+                  말이 끊기거나 실수한 구간입니다. 되살리기를 누르면 완성 영상에 다시 포함됩니다.
+                </div>
+                {plan.cuts.map((cut, idx) => {
+                  const isCutApplied =
+                    activeCutMap[idx] !== undefined
+                      ? activeCutMap[idx]
+                      : cut.confidence >= 0.7;
 
-              const sourceVal =
-                codeObj?.source || verifyCheck?.source || "argon-code";
-              const attemptsVal =
-                codeObj?.attempts || verifyCheck?.attempts || 1;
-              const verifiedOk = verifyCheck ? verifyCheck.ok : true;
+                  return (
+                    <div
+                      key={idx}
+                      className="p-3.5 rounded-[4px] bg-[#181818] border border-[#3e3e3e] space-y-2.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded-[4px] bg-[#282828] border border-[#3e3e3e] text-[12px] font-medium text-[#f1f1f1]">
+                            {CUT_REASON_LABEL[cut.reason] || cut.reason}
+                          </span>
+                          <span className="text-[13px] font-mono text-[#f1f1f1]">
+                            {formatTimeSec(cut.start)} ~ {formatTimeSec(cut.end)}
+                          </span>
+                          {cut.confidence < 0.7 && (
+                            <span className="text-[11px] text-[#aaaaaa]">
+                              (확인 권장)
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onPreviewCutInRaw(cut.start)}
+                            className="px-2.5 py-1 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] text-[#f1f1f1] cursor-pointer"
+                          >
+                            해당 부분 들어보기
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onToggleCut(idx)}
+                            className={`px-3 py-1 rounded-[4px] text-[12px] font-medium cursor-pointer border transition-colors ${
+                              isCutApplied
+                                ? "bg-[#282828] hover:bg-[#323232] border-[#3e3e3e] text-[#3ea6ff]"
+                                : "bg-[#3ea6ff] text-[#0f0f0f] border-[#3ea6ff]"
+                            }`}
+                          >
+                            {isCutApplied ? "되살리기" : "잘라내기"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[12px] text-[#aaaaaa]">
+                        <span>{cut.note || "불필요한 구간"}</span>
+                        <span>
+                          {isCutApplied ? "현재: 잘라냄" : "현재: 복원됨"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ==================== TAB 3: AI 장면 ==================== */}
+        {activeTab === "ai-scenes" && (
+          <div className="space-y-4">
+            <div className="text-[12px] text-[#aaaaaa]">
+              보충 설명이 필요한 부분에 AI가 만든 설명 장면과 내레이션입니다.
+            </div>
+
+            {aiScenes.map((scene, idx) => {
+              const isSelected = scene.id === selectedSceneId;
+              const isRevisingThis = revisingSceneId === scene.id;
+              const isTtsLoading = ttsLoadingSceneId === scene.id;
+              const hasAudio = Boolean(scene.audioUrl || scene.audioBase64);
 
               return (
                 <div
                   key={scene.id}
                   onClick={() => onSelectScene(scene.id)}
-                  className={`rounded-xl p-3.5 border transition-all cursor-pointer space-y-2.5 ${
+                  className={`p-4 rounded-[4px] border space-y-3 transition-colors cursor-pointer ${
                     isSelected
-                      ? "bg-[#202430] border-[#c6ff00] ring-1 ring-[#c6ff00]/40"
-                      : isMotionOrEnding
-                        ? "bg-[#1f1c29] border-[#7c4dff]/50 hover:border-[#c6ff00]/60"
-                        : "bg-[#1f1f1f] border-[#3e3e3e] hover:border-[#3ea6ff]/50"
+                      ? "bg-[#1f1f1f] border-[#3ea6ff] border-l-[3px]"
+                      : "bg-[#181818] border-[#3e3e3e]"
                   }`}
                 >
-                  {/* Card Top Row: Scene Index, Kind Badge, Duration */}
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-mono font-bold text-[#aaaaaa]">
-                        #{idx + 1}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
-                          scene.kind === "motion"
-                            ? "bg-[#c6ff00] text-[#111111]"
-                            : scene.kind === "ending"
-                              ? "bg-[#7c4dff] text-white"
-                              : "bg-[#3ea6ff]/20 text-[#3ea6ff] border border-[#3ea6ff]/40"
-                        }`}
-                      >
-                        {scene.kind === "motion"
-                          ? "★ MOTION (신규 설명)"
-                          : scene.kind === "ending"
-                            ? "ENDING (엔딩 카드)"
-                            : "ORIGINAL (원본 발화)"}
-                      </span>
-                      <span className="text-[11px] font-mono text-white font-semibold">
-                        {scene.durationSec.toFixed(1)}s
-                      </span>
-                    </div>
-
-                    {isMotionOrEnding && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setOpenCodeSceneId(isCodeOpen ? null : scene.id);
-                        }}
-                        className="px-2.5 py-1 rounded bg-[#282828] hover:bg-[#3a3a3a] border border-[#3e3e3e] text-[11px] font-mono font-semibold text-[#3ea6ff] flex items-center gap-1 cursor-pointer"
-                      >
-                        <span className="material-symbols-outlined text-[14px]">
-                          code
-                        </span>
-                        <span>{isCodeOpen ? "코드 닫기" : "코드 보기"}</span>
-                      </button>
-                    )}
+                    <span className="text-[13px] font-medium text-[#f1f1f1]">
+                      장면 #{idx + 1} ·{" "}
+                      {scene.kind === "ending" ? "마무리 카드" : "설명 모션 장면"}
+                    </span>
+                    <span className="text-[12px] font-mono text-[#aaaaaa]">
+                      {scene.durationSec.toFixed(1)}초
+                    </span>
                   </div>
 
-                  {/* Caption & Script */}
-                  <div className="space-y-1">
-                    <div className="text-[13.5px] font-bold text-white">
-                      {scene.caption}
-                    </div>
-                    <p className="text-[12px] text-[#dddddd] leading-snug">
-                      &ldquo;{scene.script}&rdquo;
-                    </p>
-                    <p className="text-[11px] text-[#aaaaaa]">
-                      <strong className="text-[#cccccc]">시각 연출:</strong>{" "}
-                      {scene.visualIdea}
-                    </p>
-                  </div>
-
-                  {/* 3 REQUIRED VERIFICATION BADGES for motion & ending scenes */}
-                  {isMotionOrEnding && (
-                    <div className="pt-1 flex flex-wrap items-center gap-1.5">
-                      {/* 1) source badge */}
-                      <span
-                        className={`px-2 py-0.5 rounded-md text-[10.5px] font-mono font-bold border ${
-                          sourceVal === "argon-code"
-                            ? "bg-[#7c4dff]/25 border-[#7c4dff] text-[#d8c8ff]"
-                            : "bg-[#f59e0b]/25 border-[#f59e0b] text-[#fde68a]"
-                        }`}
-                      >
-                        source: {sourceVal}
-                      </span>
-
-                      {/* 2) attempts badge */}
-                      <span
-                        className={`px-2 py-0.5 rounded-md text-[10.5px] font-mono font-bold border ${
-                          attemptsVal > 1
-                            ? "bg-[#3ea6ff]/25 border-[#3ea6ff] text-[#84caff]"
-                            : "bg-[#282828] border-[#3e3e3e] text-[#cccccc]"
-                        }`}
-                      >
-                        attempts: {attemptsVal}
-                        {attemptsVal > 1 ? " (자동 수정됨)" : ""}
-                      </span>
-
-                      {/* 3) verified badge */}
-                      <span
-                        className={`px-2 py-0.5 rounded-md text-[10.5px] font-bold border ${
-                          verifiedOk
-                            ? "bg-[#c6ff00]/20 border-[#c6ff00] text-[#c6ff00]"
-                            : "bg-[#f59e0b]/20 border-[#f59e0b] text-[#fbbf24]"
-                        }`}
-                      >
-                        {verifiedOk ? "✓ 시각 검증 통과" : "⚠ 재시도/경고"}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Expandable Argon Canvas 2D Code Viewer */}
-                  {isMotionOrEnding && isCodeOpen && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="mt-2 rounded-lg bg-[#111111] border border-[#3e3e3e] overflow-hidden"
-                    >
-                      <div className="px-3 py-1.5 bg-[#1a1a1a] border-b border-[#3e3e3e] flex items-center justify-between text-[11px] font-mono text-[#aaaaaa]">
-                        <span>
-                          function draw(ctx, t, w, h, scene) &#123; ... &#125;
-                        </span>
-                        <span className="text-[#c6ff00]">
-                          Worker Sandbox Validated
-                        </span>
-                      </div>
-                      <pre className="p-3 text-[11px] font-mono text-[#e2e8f0] overflow-x-auto max-h-52 leading-relaxed">
-                        <code>
-                          {codeObj?.code ||
-                            "// Argon Canvas 2D code ready for execution"}
-                        </code>
-                      </pre>
-                    </div>
-                  )}
-
-                  {/* Scene Revise Input & Button (/api/revise) */}
+                  {/* Title / Caption */}
                   <div
                     onClick={(e) => e.stopPropagation()}
-                    className="pt-2 border-t border-[#3e3e3e]/70 space-y-1.5"
+                    className="space-y-1"
                   >
-                    <div className="flex items-center gap-1.5">
+                    <label className="text-[12px] text-[#aaaaaa] block">
+                      장면 제목
+                    </label>
+                    <input
+                      type="text"
+                      value={scene.caption}
+                      onChange={(e) =>
+                        onUpdateSceneText(scene.id, { caption: e.target.value })
+                      }
+                      className="w-full bg-[#282828] border border-[#3e3e3e] focus:border-[#3ea6ff] rounded-[4px] px-2.5 py-1.5 text-[14px] text-[#f1f1f1] focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Script / Narration */}
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="space-y-1.5"
+                  >
+                    <label className="text-[12px] text-[#aaaaaa] block">
+                      내레이션 대본
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={scene.script}
+                      onChange={(e) =>
+                        onUpdateSceneText(scene.id, { script: e.target.value })
+                      }
+                      className="w-full bg-[#282828] border border-[#3e3e3e] focus:border-[#3ea6ff] rounded-[4px] px-2.5 py-1.5 text-[14px] text-[#f1f1f1] focus:outline-none resize-none"
+                    />
+
+                    {/* TTS Audio Controls */}
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={isTtsLoading}
+                        onClick={() => handlePlaySceneAudio(scene)}
+                        className="px-3 py-1.5 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] font-medium text-[#f1f1f1] flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <span className="material-symbols-outlined text-[16px] text-[#3ea6ff]">
+                          {playingSceneId === scene.id ? "volume_up" : "play_arrow"}
+                        </span>
+                        <span>
+                          {isTtsLoading
+                            ? "음성 생성 중..."
+                            : playingSceneId === scene.id
+                              ? "재생 중..."
+                              : "▶ 음성 듣기"}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isTtsLoading}
+                        onClick={() => onSynthesizeSceneTts(scene, true)}
+                        className="px-3 py-1.5 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] text-[#aaaaaa] hover:text-[#f1f1f1] cursor-pointer disabled:opacity-50"
+                      >
+                        음성 다시 생성
+                      </button>
+
+                      {hasAudio && (
+                        <span className="text-[11px] text-[#2ba640]">
+                          ✓ 내 목소리 적용됨
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Quick Revise Buttons + Custom Revise Input */}
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="pt-2 border-t border-[#3e3e3e] space-y-2"
+                  >
+                    <div className="text-[12px] text-[#aaaaaa]">
+                      장면 다듬기
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isRevisingThis}
+                        onClick={() =>
+                          onReviseScene(
+                            scene,
+                            "전문 용어를 줄이고 더 쉬운 표현과 직관적인 도형으로 바꿔줘"
+                          )
+                        }
+                        className="px-2.5 py-1 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] text-[#f1f1f1] cursor-pointer disabled:opacity-50"
+                      >
+                        더 쉽게
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isRevisingThis}
+                        onClick={() =>
+                          onReviseScene(
+                            scene,
+                            "문장을 더 짧고 간결하게 줄이고 핵심 단어만 크게 강조해줘"
+                          )
+                        }
+                        className="px-2.5 py-1 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] text-[#f1f1f1] cursor-pointer disabled:opacity-50"
+                      >
+                        더 짧게
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isRevisingThis}
+                        onClick={() =>
+                          onReviseScene(
+                            scene,
+                            "화면 구성과 모션 그래픽 배치를 새로운 형태로 다시 만들어줘"
+                          )
+                        }
+                        className="px-2.5 py-1 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] text-[#f1f1f1] cursor-pointer disabled:opacity-50"
+                      >
+                        다시 만들기
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
                       <input
                         type="text"
                         value={reviseInputs[scene.id] ?? ""}
@@ -467,18 +466,21 @@ export const ArgonDirectorPanel: React.FC<ArgonDirectorPanelProps> = ({
                             [scene.id]: e.target.value,
                           }))
                         }
-                        placeholder='예: "글자를 더 크게 하고 핵심 키워드를 라임색으로 강조해줘"'
-                        className="flex-1 h-8 px-2.5 rounded-lg bg-[#141414] border border-[#3e3e3e] focus:border-[#c6ff00] text-[11.5px] text-white placeholder-[#777777] focus:outline-none"
+                        placeholder="원하는 수정 내용을 직접 입력하세요"
+                        className="flex-1 bg-[#282828] border border-[#3e3e3e] focus:border-[#3ea6ff] rounded-[4px] px-2.5 py-1.5 text-[13px] text-[#f1f1f1] placeholder-[#717171] focus:outline-none"
                       />
                       <button
                         type="button"
                         disabled={isRevisingThis}
-                        onClick={() => handleReviseSubmit(scene)}
-                        className="h-8 px-3 rounded-lg bg-gradient-to-r from-[#7c4dff] to-[#3ea6ff] hover:brightness-110 text-[11px] font-bold text-white shrink-0 transition-all cursor-pointer disabled:opacity-50"
+                        onClick={() => {
+                          const text =
+                            (reviseInputs[scene.id] || "").trim() ||
+                            "글자를 더 크게 하고 핵심 키워드를 강조해줘";
+                          onReviseScene(scene, text);
+                        }}
+                        className="px-3 py-1.5 rounded-[4px] bg-[#3ea6ff] hover:bg-[#65b8ff] text-[#0f0f0f] text-[13px] font-medium shrink-0 cursor-pointer disabled:opacity-50"
                       >
-                        {isRevisingThis
-                          ? "수정 중..."
-                          : "이 장면 수정 (/api/revise)"}
+                        {isRevisingThis ? "수정 중..." : "적용"}
                       </button>
                     </div>
                   </div>
@@ -486,74 +488,177 @@ export const ArgonDirectorPanel: React.FC<ArgonDirectorPanelProps> = ({
               );
             })}
           </div>
-        </section>
+        )}
 
-        {/* ============================================================
-            ⑤ 모델 호출 & 검증 루프 실시간 로그 (ModelCallLogEntry[])
-           ============================================================ */}
-        <section className="space-y-2.5 pt-2 border-t border-[#3e3e3e]">
-          <div className="flex items-center justify-between">
-            <h3 className="text-[13px] font-bold text-white flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-[#3ea6ff]/20 text-[#3ea6ff] text-[11px] font-mono">
-                ⑤
-              </span>
-              <span>모델 호출 &amp; 검증 루프 실시간 로그</span>
-            </h3>
-            <span className="text-[11px] font-mono text-[#c6ff00]">
-              {modelLogs.length} calls recorded
-            </span>
-          </div>
-
-          <div className="rounded-xl bg-[#111111] border border-[#3e3e3e] p-3 space-y-2 font-mono text-[11px] max-h-72 overflow-y-auto">
-            {modelLogs.map((log) => {
-              const statusBadge =
-                log.status === "ok"
-                  ? "bg-[#2ba640]/20 text-[#6ee7b7] border-[#2ba640]/50"
-                  : log.status === "retry"
-                    ? "bg-[#f59e0b]/20 text-[#fde68a] border-[#f59e0b]/50"
-                    : log.status === "fallback"
-                      ? "bg-[#f97316]/20 text-[#fdba74] border-[#f97316]/50"
-                      : "bg-[#f04438]/20 text-[#fda29b] border-[#f04438]/50";
-
-              return (
-                <div
-                  key={log.id}
-                  className="p-2 rounded bg-[#1a1a1a] border border-[#2e2e2e] space-y-1"
+        {/* ==================== TAB 4: AI 작업 기록 ==================== */}
+        {activeTab === "logs" && (
+          <div className="space-y-4">
+            {/* Verification Summary */}
+            <div className="p-3.5 rounded-[4px] bg-[#181818] border border-[#3e3e3e] space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-medium text-[#f1f1f1]">
+                  화면 품질 확인 결과
+                </span>
+                <button
+                  type="button"
+                  disabled={verifying}
+                  onClick={onRunVerify}
+                  className="px-2.5 py-1 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[12px] text-[#f1f1f1] cursor-pointer disabled:opacity-50"
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[#888888]">{log.timestamp}</span>
-                      <span className="px-1.5 py-0.5 rounded bg-[#282828] text-[#3ea6ff] font-bold">
-                        {log.endpoint}
+                  {verifying ? "확인 중..." : "화면 다시 확인"}
+                </button>
+              </div>
+              <div className="text-[12px] text-[#aaaaaa] space-y-1">
+                <div>
+                  상태:{" "}
+                  <strong className="text-[#f1f1f1]">
+                    {verifyReport.passed ? "통과" : "재확인 필요"}
+                  </strong>
+                </div>
+                <div>
+                  검증 방식:{" "}
+                  <span className="text-[#f1f1f1]">
+                    {verifyReport.verificationMode === "structural-check"
+                      ? "구조 검증 (structural-check)"
+                      : "멀티모달 화면 검증 (multimodal-argon)"}
+                  </span>
+                </div>
+                {verifyReport.usedModel && (
+                  <div>
+                    검증 모델:{" "}
+                    <span className="font-mono text-[#f1f1f1]">
+                      {verifyReport.usedModel}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Per-Scene Code & Fallback Status */}
+            <div className="space-y-2">
+              <div className="text-[12px] font-medium text-[#aaaaaa]">
+                장면별 코드 생성 기록
+              </div>
+              {aiScenes.map((scene) => {
+                const codeObj = sceneCodes[scene.id];
+                const check = verifyReport.checks.find(
+                  (c) => c.sceneId === scene.id
+                );
+                const source = codeObj?.source || check?.source || "argon-code";
+                const attempts = codeObj?.attempts || check?.attempts || 1;
+                const isCodeOpen = openCodeSceneId === scene.id;
+
+                return (
+                  <div
+                    key={scene.id}
+                    className="p-3 rounded-[4px] bg-[#181818] border border-[#3e3e3e] space-y-2 text-[12px]"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium text-[#f1f1f1]">
+                        {scene.caption}
                       </span>
-                      {log.sceneId && (
-                        <span className="text-[#c9b8ff]">[{log.sceneId}]</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenCodeSceneId(isCodeOpen ? null : scene.id)
+                        }
+                        className="px-2 py-0.5 rounded-[4px] bg-[#282828] hover:bg-[#323232] border border-[#3e3e3e] text-[11px] text-[#3ea6ff] cursor-pointer"
+                      >
+                        {isCodeOpen ? "모션 코드 닫기" : "모션 코드 보기"}
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3 text-[#aaaaaa]">
+                      <span>
+                        생성 방식:{" "}
+                        <strong className="text-[#f1f1f1]">
+                          {source === "argon-code"
+                            ? "AI 코드 생성 (argon-code)"
+                            : "기본 템플릿 대체 (template-fallback)"}
+                        </strong>
+                      </span>
+                      <span>시도 횟수: {attempts}회</span>
+                      {codeObj?.usedModel && (
+                        <span>모델: {codeObj.usedModel}</span>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[#aaaaaa]">
-                        attempt #{log.attempt}
-                      </span>
-                      <span className="text-[#c6ff00]">{log.durationMs}ms</span>
-                      <span
-                        className={`px-1.5 py-0.2 rounded border text-[10px] font-bold uppercase ${statusBadge}`}
-                      >
-                        {log.status}
-                      </span>
-                    </div>
+                    {isCodeOpen && (
+                      <pre className="p-2.5 rounded-[4px] bg-[#111111] border border-[#3e3e3e] text-[11px] font-mono text-[#cccccc] overflow-x-auto max-h-48">
+                        <code>{codeObj?.code || "// 코드 없음"}</code>
+                      </pre>
+                    )}
                   </div>
-                  {log.detail && (
-                    <div className="text-[#cccccc] font-sans text-[11.5px] pl-1">
-                      ↳ {log.detail}
-                    </div>
-                  )}
+                );
+              })}
+            </div>
+
+            {/* Uncertain Facts if any */}
+            {plan.uncertainFacts && plan.uncertainFacts.length > 0 && (
+              <div className="p-3 rounded-[4px] bg-[#181818] border border-[#3e3e3e] space-y-1">
+                <div className="text-[12px] font-medium text-[#f1f1f1]">
+                  참고 사항 (확인 필요 내용)
                 </div>
-              );
-            })}
+                {plan.uncertainFacts.map((fact, idx) => (
+                  <p key={idx} className="text-[12px] text-[#aaaaaa]">
+                    • {fact}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            {/* Full API / Model Call Log */}
+            <div className="space-y-2">
+              <div className="text-[12px] font-medium text-[#aaaaaa]">
+                API 호출 기록 ({modelLogs.length}건)
+              </div>
+              {modelLogs.length === 0 ? (
+                <div className="text-[12px] text-[#717171]">
+                  아직 기록된 호출이 없습니다.
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {modelLogs.map((log) => (
+                    <div
+                      key={log.id}
+                      className="p-2.5 rounded-[4px] bg-[#181818] border border-[#3e3e3e] text-[11px] space-y-1"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-1 font-mono">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[#717171]">{log.timestamp}</span>
+                          <span className="text-[#3ea6ff]">{log.endpoint}</span>
+                          <span className="text-[#aaaaaa]">
+                            ({log.usedModel || log.model})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[#aaaaaa]">
+                            시도 {log.attempt}회 · {log.durationMs}ms
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded-[2px] ${
+                              log.status === "ok"
+                                ? "text-[#2ba640]"
+                                : log.status === "error"
+                                  ? "text-[#ff4e45]"
+                                  : "text-[#aaaaaa]"
+                            }`}
+                          >
+                            {log.status}
+                          </span>
+                        </div>
+                      </div>
+                      {log.detail && (
+                        <div className="text-[#aaaaaa]">{log.detail}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </section>
+        )}
       </div>
-    </aside>
+    </div>
   );
 };
