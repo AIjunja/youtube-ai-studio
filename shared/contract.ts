@@ -184,10 +184,14 @@ export type PlanResponse = ScenePlan & {
   modelLog?: ModelCallLogEntry;
 };
 
+export type ScriptMode = "append" | "from-scratch";
+
 /** POST /api/script */
 export type ScriptSceneDraft = {
   id: string;
+  kind?: SceneKind;
   script: string;
+  narration?: string;
   caption: string;
   visualIdea: string;
   durationSec: number;
@@ -196,14 +200,14 @@ export type ScriptSceneDraft = {
   insertAfterSceneId?: string;
 };
 export type ScriptRequest = {
-  mode: "append" | "from-scratch";
+  mode: ScriptMode;
   plan?: ScenePlan;
   topic?: string;
   notes?: string;
   targetSceneCount?: number;
 };
 export type ScriptResponse = {
-  mode: "append" | "from-scratch";
+  mode: ScriptMode;
   scenes: ScriptSceneDraft[];
   plan?: ScenePlan;
   usedModel: string;
@@ -215,12 +219,14 @@ export type TtsRequest = {
   text: string;
   voiceId?: string;
   style?: string;
+  sceneId?: string;
 };
 /** Note: POST /api/tts returns binary `audio/wav` with header `X-Used-Model` (or JSON if `format: "json"` is passed) */
 export type TtsJsonResponse = {
   audioBase64: string;
   mimeType: "audio/wav";
   usedModel: string;
+  voiceId?: string;
   durationSec?: number;
   modelLog?: ModelCallLogEntry;
 };
