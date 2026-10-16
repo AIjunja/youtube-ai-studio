@@ -8,13 +8,13 @@ export function getArgonModel(): string {
 
 // Compatible fallback models if the primary ARGON_MODEL returns 404/400/429 in the runtime environment
 const FALLBACK_MODELS = [
-  "gemini-3.5-flash",
   "gemini-3-flash-preview",
+  "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
   "gemini-flash-latest",
 ];
 
-const MODEL_CALL_TIMEOUT_MS = Number(process.env.ARGON_TIMEOUT_MS || 18000);
+const MODEL_CALL_TIMEOUT_MS = Number(process.env.ARGON_TIMEOUT_MS || 12000);
 
 let cachedClient: GoogleGenAI | null = null;
 let cachedKey: string | undefined;

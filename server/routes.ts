@@ -845,9 +845,26 @@ apiRouter.post(
         ];
       }
 
-      const revisedScene =
+      const candidateScene =
         updatedPlan.scenes.find((s) => s.id === sceneId) ||
-        updatedPlan.scenes[targetIndex];
+        updatedPlan.scenes[targetIndex] ||
+        plan.scenes[targetIndex];
+
+      const originalTarget = plan.scenes[targetIndex];
+      const revisedScene = {
+        ...originalTarget,
+        ...candidateScene,
+        id: originalTarget.id,
+        kind: originalTarget.kind,
+      };
+
+      // Guarantee that ONLY the requested scene is modified while all other scenes remain untouched (B6)
+      updatedPlan = {
+        ...plan,
+        scenes: plan.scenes.map((s, idx) =>
+          idx === targetIndex ? revisedScene : s
+        ),
+      };
 
       let updatedSceneCode: ReviseResponse["updatedSceneCode"] = undefined;
 
