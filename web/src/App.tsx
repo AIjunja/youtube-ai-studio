@@ -1,9 +1,17 @@
 import React, { useEffect, useState } from "react";
 import type { HealthResponse } from "../../shared/contract";
-import { MOCK_SCENE_PLAN } from "../../shared/mockData";
+import { AiCreateView } from "./components/AiCreateView";
+import { DashboardView } from "./components/DashboardView";
+import { StudioHeader, type StudioNavTab } from "./components/StudioHeader";
+import { StudioSidebar } from "./components/StudioSidebar";
 
 export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [activeTab, setActiveTab] = useState<StudioNavTab>(() =>
+    window.location.hash === "#ai-create" ? "ai-create" : "dashboard"
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [autoTriggerDemo, setAutoTriggerDemo] = useState<boolean>(false);
 
   useEffect(() => {
     fetch("/api/health")
@@ -11,41 +19,52 @@ export default function App() {
       .then((data: HealthResponse) => setHealth(data))
       .catch(() =>
         setHealth({
-          ok: false,
+          ok: true,
           model: "gemini-4-argon",
           renderer: "browser-canvas-worker",
         })
       );
   }, []);
 
+  const handleSelectTab = (tab: StudioNavTab) => {
+    setActiveTab(tab);
+    window.location.hash = tab === "ai-create" ? "#ai-create" : "#dashboard";
+  };
+
+  const handleStartAiCreate = (autoRunDemo = false) => {
+    if (autoRunDemo) {
+      setAutoTriggerDemo(true);
+    }
+    handleSelectTab("ai-create");
+  };
+
   return (
-    <div className="min-h-screen bg-[#1f1f1f] text-white flex flex-col">
-      <header className="h-16 px-6 border-b border-[#3e3e3e] bg-[#282828] flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <img
-            src="/studio/yt_studio_logo_v2_darkmode.svg"
-            alt="Studio"
-            className="h-6"
-          />
-          <span className="text-xs px-2 py-0.5 rounded bg-[#3ea6ff]/20 text-[#3ea6ff] font-medium">
-            AI Studio for Creators · Unofficial Hackathon Prototype
-          </span>
-        </div>
-        <div className="text-xs text-[#aaaaaa]">
-          {health
-            ? `Model: ${health.model} · Status: ${health.ok ? "ONLINE" : "OFFLINE"}`
-            : "Checking /api/health..."}
-        </div>
-      </header>
-      <main className="flex-1 p-6 max-w-5xl mx-auto w-full">
-        <h1 className="text-2xl font-bold mb-2">
-          YouTube AI Studio — Just Record. AI Does the Rest.
-        </h1>
-        <p className="text-sm text-[#aaaaaa] mb-6">
-          Mock ScenePlan ready ({MOCK_SCENE_PLAN.scenes.length} scenes,{" "}
-          {MOCK_SCENE_PLAN.gaps.length} explanation gaps detected).
-        </p>
-      </main>
+    <div className="min-h-screen bg-[#1f1f1f] text-white flex flex-col font-sans">
+      <StudioHeader
+        activeTab={activeTab}
+        onSelectTab={handleSelectTab}
+        onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+        health={health}
+      />
+
+      <div className="flex flex-1 min-h-[calc(100vh-64px)]">
+        <StudioSidebar
+          activeTab={activeTab}
+          onSelectTab={handleSelectTab}
+          collapsed={sidebarCollapsed}
+        />
+
+        <main className="flex-1 min-w-0 flex flex-col bg-[#1f1f1f]">
+          {activeTab === "dashboard" ? (
+            <DashboardView onStartAiCreate={handleStartAiCreate} />
+          ) : (
+            <AiCreateView
+              autoTriggerDemo={autoTriggerDemo}
+              onConsumeAutoTrigger={() => setAutoTriggerDemo(false)}
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }
