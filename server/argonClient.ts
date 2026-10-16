@@ -4,9 +4,9 @@ import type { ModelCallLogEntry } from "../shared/contract.js";
 export type ModelCallStatus = ModelCallLogEntry["status"];
 
 const DEFAULT_PRIMARY_MODEL = "gemini-4-argon";
-const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.8-flash";
 const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
-const MODEL_CALL_TIMEOUT_MS = Number(process.env.ARGON_TIMEOUT_MS || 45000);
+const MODEL_CALL_TIMEOUT_MS = Number(process.env.ARGON_TIMEOUT_MS || 75000);
 
 let cachedClient: GoogleGenAI | null = null;
 let cachedApiKey: string | null = null;
