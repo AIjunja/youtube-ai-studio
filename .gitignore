@@ -9,5 +9,6 @@ credentials*.json
 .DS_Store
 reference/
 .worktrees/
-docs/demo/
+docs/demo/frames/
+docs/demo/part-*.mp4
 *.log
