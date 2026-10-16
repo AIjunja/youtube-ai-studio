@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+:root {
+  --yt-bg: #1f1f1f;
+  --yt-surface: #282828;
+  --yt-border: #3e3e3e;
+  --yt-hover: #3a3a3a;
+  --yt-text-primary: #ffffff;
+  --yt-text-secondary: #aaaaaa;
+  --yt-accent-blue: #3ea6ff;
+  --yt-lime: #c6ff00;
+  font-family: "Roboto", "Noto Sans KR", sans-serif;
+}
+
+body {
+  background-color: #1f1f1f;
+  color: #ffffff;
+  margin: 0;
+  padding: 0;
+}
+
+.material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  user-select: none;
+}
