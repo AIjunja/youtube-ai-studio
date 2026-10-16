@@ -1,62 +1,91 @@
-import { GoogleGenAI, type Part, type Schema } from "@google/genai";
-import crypto from "node:crypto";
+import { GoogleGenAI, ThinkingLevel, type Part } from "@google/genai";
 import type { ModelCallLogEntry } from "../shared/contract.js";
 
-export function getArgonModel(): string {
-  return process.env.ARGON_MODEL || "gemini-4-argon";
-}
+export type ModelCallStatus = ModelCallLogEntry["status"];
 
-// Compatible fallback models if the primary ARGON_MODEL returns 404/400/429 in the runtime environment
-const FALLBACK_MODELS = [
-  "gemini-3-flash-preview",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-  "gemini-flash-latest",
-];
-
-const MODEL_CALL_TIMEOUT_MS = Number(process.env.ARGON_TIMEOUT_MS || 12000);
+const DEFAULT_PRIMARY_MODEL = "gemini-4-argon";
+const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
+const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
+const MODEL_CALL_TIMEOUT_MS = Number(process.env.ARGON_TIMEOUT_MS || 45000);
 
 let cachedClient: GoogleGenAI | null = null;
-let cachedKey: string | undefined;
+let cachedApiKey: string | null = null;
 
+/**
+ * Returns the configured primary Argon model ID.
+ * Always managed via process.env.ARGON_MODEL with fallback to "gemini-4-argon".
+ */
+export function getArgonModel(): string {
+  return (process.env.ARGON_MODEL || DEFAULT_PRIMARY_MODEL).trim();
+}
+
+/**
+ * Returns the configured TTS model ID.
+ * Managed via process.env.TTS_MODEL with fallback to "gemini-3.8-flash-tts".
+ */
+export function getTtsModel(): string {
+  return (process.env.TTS_MODEL || DEFAULT_TTS_MODEL).trim();
+}
+
+/**
+ * Checks whether GEMINI_API_KEY (or GOOGLE_API_KEY) is present and non-empty.
+ */
+export function hasApiKey(): boolean {
+  const key = (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    ""
+  ).trim();
+  return key.length > 0;
+}
+
+/**
+ * Returns a cached GoogleGenAI SDK client instance if an API key is configured.
+ */
 export function getGenAIClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
+  const key = (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    ""
+  ).trim();
+  if (!key) {
     return null;
   }
-  if (!cachedClient || cachedKey !== apiKey) {
-    cachedClient = new GoogleGenAI({ apiKey });
-    cachedKey = apiKey;
+  if (!cachedClient || cachedApiKey !== key) {
+    cachedClient = new GoogleGenAI({ apiKey: key });
+    cachedApiKey = key;
   }
   return cachedClient;
 }
 
 /**
- * Redact any accidental API key appearance in error messages before logging or returning.
+ * Strips any potential API key patterns from error messages before logging or returning.
  */
 export function sanitizeErrorMessage(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  const key = process.env.GEMINI_API_KEY?.trim();
-  if (key && key.length > 4) {
-    return raw.split(key).join("[REDACTED_KEY]");
-  }
-  return raw.slice(0, 300);
+  return raw.replace(/AIza[0-9A-Za-z\-_]{20,}/g, "[REDACTED_KEY]").slice(0, 400);
 }
 
+/**
+ * Helper to create a standardized ModelCallLogEntry for the right-side Argon log panel.
+ */
 export function createModelLog(params: {
   endpoint: ModelCallLogEntry["endpoint"];
-  model: string;
+  model?: string;
+  usedModel?: string;
   sceneId?: string;
   attempt: number;
   durationMs: number;
-  status: ModelCallLogEntry["status"];
+  status: ModelCallStatus;
   detail?: string;
 }): ModelCallLogEntry {
+  const actualModel = params.usedModel || params.model || getArgonModel();
   return {
-    id: `log-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     timestamp: new Date().toISOString(),
     endpoint: params.endpoint,
-    model: params.model,
+    model: actualModel,
+    usedModel: actualModel,
     ...(params.sceneId ? { sceneId: params.sceneId } : {}),
     attempt: params.attempt,
     durationMs: Math.max(1, Math.round(params.durationMs)),
@@ -65,72 +94,57 @@ export function createModelLog(params: {
   };
 }
 
-export type ArgonCallOptions = {
+export interface ArgonCallOptions {
   endpoint: ModelCallLogEntry["endpoint"];
   sceneId?: string;
   attempt?: number;
   systemInstruction?: string;
-  contents: Array<string | Part>;
+  contents: Array<Part | string>;
   responseMimeType?: string;
-  responseSchema?: Schema;
+  responseSchema?: Record<string, unknown>;
   temperature?: number;
-};
+  timeoutMs?: number;
+}
 
-export type ArgonCallResult = {
+export interface ArgonCallResult {
   ok: boolean;
   text: string;
   usedModel: string;
   fellBackModel: boolean;
-  error?: string;
   modelLog: ModelCallLogEntry;
-};
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Timeout after ${ms}ms (${label})`));
-    }, ms);
-    promise.then(
-      (val) => {
-        clearTimeout(timer);
-        resolve(val);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      }
-    );
-  });
+  error?: string;
 }
 
 /**
- * Calls `ARGON_MODEL` first via `@google/genai`.
- * If `ARGON_MODEL` fails with 404/400/429/not-found/permission error, logs immediately
- * and retries automatically with compatible Gemini models so the live demo never crashes.
+ * Calls the configured Argon model via @google/genai.
+ * If the primary model ("gemini-4-argon") is unavailable in the environment,
+ * automatically retries once with "gemini-2.5-flash" so the pipeline stays live,
+ * while logging the exact usedModel truthfully.
  */
 export async function callArgonModel(
-  opts: ArgonCallOptions
+  options: ArgonCallOptions
 ): Promise<ArgonCallResult> {
+  const startMs = Date.now();
   const primaryModel = getArgonModel();
-  const attemptNum = opts.attempt ?? 1;
-  const startTime = Date.now();
+  const attempt = options.attempt ?? 1;
+  const effectiveTimeoutMs = options.timeoutMs ?? MODEL_CALL_TIMEOUT_MS;
   const client = getGenAIClient();
 
   if (!client) {
-    const durationMs = Date.now() - startTime;
-    const msg = "GEMINI_API_KEY is not set; using structured demo fallback.";
-    console.warn(`[ArgonClient] ${opts.endpoint}: ${msg}`);
+    const durationMs = Date.now() - startMs;
+    const msg = "GEMINI_API_KEY is not configured; using deterministic fallback.";
     return {
       ok: false,
       text: "",
-      usedModel: primaryModel,
+      usedModel: "template-fallback",
       fellBackModel: false,
       error: msg,
       modelLog: createModelLog({
-        endpoint: opts.endpoint,
-        model: primaryModel,
-        sceneId: opts.sceneId,
-        attempt: attemptNum,
+        endpoint: options.endpoint,
+        model: "template-fallback",
+        usedModel: "template-fallback",
+        sceneId: options.sceneId,
+        attempt,
         durationMs,
         status: "fallback",
         detail: msg,
@@ -138,88 +152,115 @@ export async function callArgonModel(
     };
   }
 
-  const modelsToTry = [
-    primaryModel,
-    ...FALLBACK_MODELS.filter((m) => m !== primaryModel),
-  ];
+  const candidateModels =
+    primaryModel === DEFAULT_FALLBACK_MODEL
+      ? [primaryModel]
+      : [primaryModel, DEFAULT_FALLBACK_MODEL];
 
-  let lastErrorMsg = "";
+  let lastError = "";
 
-  for (let i = 0; i < modelsToTry.length; i++) {
-    const candidateModel = modelsToTry[i];
-    const isFallbackAttempt = i > 0;
+  for (let i = 0; i < candidateModels.length; i++) {
+    const candidateModel = candidateModels[i];
+    const isFallbackModel = i > 0;
 
     try {
-      const response = await withTimeout(
-        client.models.generateContent({
-          model: candidateModel,
-          contents: opts.contents,
-          config: {
-            ...(opts.systemInstruction
-              ? { systemInstruction: opts.systemInstruction }
-              : {}),
-            ...(opts.responseMimeType
-              ? { responseMimeType: opts.responseMimeType }
-              : {}),
-            ...(opts.responseSchema
-              ? { responseSchema: opts.responseSchema }
-              : {}),
-            temperature: opts.temperature ?? 0.2,
-          },
-        }),
-        MODEL_CALL_TIMEOUT_MS,
-        `${opts.endpoint}:${candidateModel}`
+      const normalizedParts: Part[] = options.contents.map((item) =>
+        typeof item === "string" ? { text: item } : item
       );
 
-      const text = response.text ?? "";
-      const durationMs = Date.now() - startTime;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () =>
+            reject(
+              new Error(`Model call timed out after ${effectiveTimeoutMs}ms`)
+            ),
+          effectiveTimeoutMs
+        );
+      });
 
-      if (!text.trim()) {
-        throw new Error(`Empty text response from model ${candidateModel}`);
+      const response = await Promise.race([
+        client.models.generateContent({
+          model: candidateModel,
+          contents: [{ role: "user", parts: normalizedParts }],
+          config: {
+            ...(options.systemInstruction
+              ? { systemInstruction: options.systemInstruction }
+              : {}),
+            ...(options.responseMimeType
+              ? { responseMimeType: options.responseMimeType }
+              : {}),
+            ...(options.responseSchema
+              ? { responseSchema: options.responseSchema }
+              : {}),
+            temperature: options.temperature ?? 0.2,
+            ...(candidateModel === DEFAULT_PRIMARY_MODEL
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+          },
+        }),
+        timeoutPromise,
+      ]).finally(() => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      });
+
+      const text = (response.text ?? "").trim();
+      const durationMs = Date.now() - startMs;
+
+      if (!text) {
+        throw new Error(`Empty response text from model ${candidateModel}`);
       }
 
-      const detail = isFallbackAttempt
-        ? `Primary model (${primaryModel}) unavailable (${lastErrorMsg.slice(0, 80)}); succeeded via compatible model (${candidateModel}).`
-        : `Argon (${primaryModel}) call succeeded.`;
+      const status: ModelCallStatus =
+        attempt > 1 ? "retry" : isFallbackModel ? "retry" : "ok";
+      const detail = isFallbackModel
+        ? `Primary model (${primaryModel}) unavailable (${lastError.slice(0, 80)}); completed with ${candidateModel}`
+        : `Completed with ${candidateModel}`;
+
+      console.log(
+        `[Argon] ${options.endpoint}${options.sceneId ? ` (${options.sceneId})` : ""} attempt=${attempt} model=${candidateModel} status=${status} duration=${durationMs}ms`
+      );
 
       return {
         ok: true,
         text,
         usedModel: candidateModel,
-        fellBackModel: isFallbackAttempt,
+        fellBackModel: isFallbackModel,
         modelLog: createModelLog({
-          endpoint: opts.endpoint,
-          model: primaryModel,
-          sceneId: opts.sceneId,
-          attempt: attemptNum,
+          endpoint: options.endpoint,
+          model: candidateModel,
+          usedModel: candidateModel,
+          sceneId: options.sceneId,
+          attempt,
           durationMs,
-          status: isFallbackAttempt ? "retry" : "ok",
+          status,
           detail,
         }),
       };
     } catch (err) {
-      lastErrorMsg = sanitizeErrorMessage(err);
+      lastError = sanitizeErrorMessage(err);
       console.warn(
-        `[ArgonClient] ${opts.endpoint} model=${candidateModel} failed: ${lastErrorMsg}`
+        `[Argon] ${options.endpoint} model=${candidateModel} attempt=${attempt} error: ${lastError}`
       );
     }
   }
 
-  const durationMs = Date.now() - startTime;
+  const durationMs = Date.now() - startMs;
   return {
     ok: false,
     text: "",
-    usedModel: primaryModel,
-    fellBackModel: true,
-    error: lastErrorMsg,
+    usedModel: "template-fallback",
+    fellBackModel: false,
+    error: lastError,
     modelLog: createModelLog({
-      endpoint: opts.endpoint,
+      endpoint: options.endpoint,
       model: primaryModel,
-      sceneId: opts.sceneId,
-      attempt: attemptNum,
+      usedModel: "template-fallback",
+      sceneId: options.sceneId,
+      attempt,
       durationMs,
-      status: "fallback",
-      detail: `Model call failed (${lastErrorMsg.slice(0, 120)}); using structured fallback.`,
+      status: "error",
+      detail: `Model call failed (${lastError.slice(0, 120)})`,
     }),
   };
 }
