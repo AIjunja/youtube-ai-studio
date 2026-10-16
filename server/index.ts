@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { API_ENDPOINTS, type HealthResponse } from "../shared/contract.js";
 import { getArgonModel, getTtsModel, hasApiKey } from "./argonClient.js";
@@ -34,21 +35,37 @@ app.get(API_ENDPOINTS.HEALTH, (_req, res) => {
 app.use(apiRouter);
 
 // Serve static build in production
-const distWebPath = path.resolve(__dirname, "../../dist/web");
-app.use(express.static(distWebPath));
+// When root is 'web' and outDir is 'dist', Vite places files at web/dist (or root/dist).
+// In compiled dist/server/index.js, __dirname is dist/server.
+const candidatePaths = [
+  path.resolve(__dirname, "../../web/dist"),
+  path.resolve(__dirname, "../web"),
+  path.resolve(process.cwd(), "web/dist"),
+  path.resolve(process.cwd(), "dist/web"),
+  path.resolve(process.cwd(), "dist"),
+];
 
-app.get("/{*splat}", (req, res, next) => {
+const resolvedWebPath =
+  candidatePaths.find((p) => fs.existsSync(path.join(p, "index.html"))) ||
+  path.resolve(process.cwd(), "web/dist");
+
+console.log(`[server] Serving static web from: ${resolvedWebPath} (exists: ${fs.existsSync(resolvedWebPath)})`);
+
+app.use(express.static(resolvedWebPath));
+
+app.get("*", (req, res, next) => {
   if (req.path.startsWith("/api/")) {
     next();
     return;
   }
-  res.sendFile(path.join(distWebPath, "index.html"), (err) => {
-    if (err) {
-      res
-        .status(200)
-        .send("YouTube AI Studio API Server Running. Start Vite on :5173 for dev.");
-    }
-  });
+  const indexPath = path.join(resolvedWebPath, "index.html");
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res
+      .status(200)
+      .send("YouTube AI Studio API Server Running. (index.html not found)");
+  }
 });
 
 app.listen(PORT, () => {
